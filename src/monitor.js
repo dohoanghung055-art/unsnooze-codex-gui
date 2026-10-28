@@ -1,0 +1,483 @@
+// Per-pane watcher (`unsnooze _monitor <pane>`), spawned detached by the launcher.
+// Responsibilities:
+//   - scrape the pane every SCRAPE_INTERVAL_MS for a live limit banner or the
+//     /rate-limit-options menu; on limit → record in state + spawn resumer
+//   - consume overload event markers from the StopFailure hook and run the
+//     seconds-scale backoff retry ladder (never touches state.json)
+//   - flip a tracked record to 'resumed' if the user/resumer got things moving
+//   - exit when the pane dies
+// tmux + timers are injectable for tests.
+
+import { readFileSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { getMultiplexer } from './multiplexer.js';
+import {
+  SCRAPE_INTERVAL_MS, PANE_SCAN_LINES, CAPTURE_LINES, EVENTS_DIR,
+  EVENT_MARKER_TTL_MS, OVERLOAD_BACKOFF_S, OVERLOAD_JITTER,
+  PROBE_INTERVAL_MS, RESET_MARGIN_MS, LEASE_GRACE_MS,
+} from './config.js';
+import { detectLimit, isBusy, overloadMatch, modelRemedy } from './patterns.js';
+import { getAgent } from './agents/index.js';
+import { pendingCodexPrompt } from './agents/codex.js';
+import { getConfig } from './settings.js';
+import { notify } from './notify.js';
+import { parseResetTime, resetAtMs, sourceRank } from './time-parser.js';
+import { upsertSession, setStatus, readState, updateState } from './state.js';
+import { prepareCalibrationSample, applyCalibrationToState } from './usage.js';
+import { latestRateLimitFromTranscript } from './watchers/claude.js';
+import { hasCodexProgressAfter } from './watchers/codex.js';
+import { spawnResumerIfNeeded, spawnDetached, monitorSpawnArgs, UNSNOOZE_BIN } from './spawn.js';
+import { restartOnVersionSkew, hasVersionSkew, PKG_VERSION } from './update-check.js';
+import { makeLogger } from './logger.js';
+import { addressHash, readLease } from './lease.js';
+import { claudeRecordEnv, hasClaudeParentUsageAfter } from './sessions.js';
+
+const log = makeLogger('monitor');
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// When to wake, from a banner's reset line.
+//
+// Exported because the stale-banner clamp below is a policy decision with a
+// boundary, and a boundary that cannot be tested directly gets tested by
+// accident. Pure: everything it depends on is an argument.
+export function resolveResetAt({
+  resetLine, bannerAt, detectedAt, limitType,
+  marginMs = RESET_MARGIN_MS, fallbackMs = PROBE_INTERVAL_MS,
+} = {}) {
+  let { at, source } = resetAtMs(parseResetTime(resetLine), {
+    marginMs,
+    fallbackMs,
+    now: new Date(detectedAt),
+    bannerAt,
+  });
+  // A 5h rolling window can never reset more than ~5h out. A parse far beyond
+  // that means the banner text is stale — e.g. scraped from pane history after
+  // midnight, where an undated clock time resolves to tomorrow. The announced
+  // reset already passed; wake now instead.
+  //
+  // Judge the announced reset itself, not the scheduled wake: resetAtMs adds
+  // the margin to an absolute parse, and counting that margin as part of the
+  // distance condemns legitimate resets near the edge of the window. With a
+  // 60-minute margin a real midnight reset seen at 19:00 is 5h away, but its
+  // wake is 6h away — stale by that test, and wrongly dragged back to 20:00.
+  if (limitType === '5h' && source === 'absolute'
+    && (at - marginMs) > detectedAt + 5.5 * 3_600_000) {
+    at = detectedAt + marginMs;
+  }
+  return { at, source };
+}
+
+export function createMonitor({
+  muxName = 'tmux', paneOwner = null, pane, leaseId = null, cwd,
+  agent = getAgent('claude'), mux = getMultiplexer(muxName, { owner: paneOwner }),
+  scrapeInterval = SCRAPE_INTERVAL_MS, notifier = notify,
+  spawner = spawnDetached, versionSkewed = hasVersionSkew, handoffBin = UNSNOOZE_BIN,
+  leaseGraceMs = LEASE_GRACE_MS, startedAt = Date.now(),
+}) {
+  const notifyCtx = { mux: muxName, pane, paneOwner };
+  let trackedKey = null;      // state key of the record we created
+  let overloadAttempt = 0;
+  let terminalNotified = false;   // one notification per terminal-error appearance
+  let running = true;
+  let firstTick = true;           // §6: don't inherit a previous session's banner
+  let leaseSeen = false;          // F4: enforce lease-gone exit only after first sighting
+
+  function markerPath() {
+    return join(EVENTS_DIR, `${addressHash({ mux: muxName, paneOwner, pane })}.json`);
+  }
+
+  function consumeMarker() {
+    try {
+      const marker = JSON.parse(readFileSync(markerPath(), 'utf-8'));
+      unlinkSync(markerPath());
+      if (Date.now() - marker.at > EVENT_MARKER_TTL_MS) return null;   // stale
+      return marker;
+    } catch {
+      return null;
+    }
+  }
+
+  // Prefer a dated transcript entry when the agent keeps one (claude).
+  function resolveBanner(paneResetLine, paneLimitType) {
+    const detectedAt = Date.now();
+    const sessionId = agent.latestSessionId?.(cwd, detectedAt) || null;
+    const fromTx = latestRateLimitFromTranscript(cwd, sessionId, { now: detectedAt });
+    if (fromTx) {
+      return {
+        resetLine: fromTx.resetLine ?? paneResetLine,
+        limitType: fromTx.limitType && fromTx.limitType !== 'unknown' ? fromTx.limitType : paneLimitType,
+        bannerAt: fromTx.timestampMs,
+        sessionId: fromTx.sessionId || sessionId,
+        via: 'transcript',
+        detectedAt,
+      };
+    }
+    return {
+      resetLine: paneResetLine,
+      limitType: paneLimitType,
+      bannerAt: null,
+      sessionId,
+      via: null,   // filled by caller (scrape/hook)
+      detectedAt,
+    };
+  }
+
+  function computeReset(resetLine, bannerAt, detectedAt, limitType) {
+    return resolveResetAt({ resetLine, bannerAt, detectedAt, limitType });
+  }
+
+  // §6 first-tick corroboration: only record if a fresh transcript backs it,
+  // or an absolute clock time resolves to a still-future instant (not the
+  // "already past → due now" path, which is margin above wall clock only).
+  function isCorroborated(resolved, at, source) {
+    if (resolved.via === 'transcript' && resolved.bannerAt != null) return true;
+    if (resolved.bannerAt != null && at - RESET_MARGIN_MS > Date.now()) return true;
+    if (source === 'absolute' && at - RESET_MARGIN_MS > Date.now()) return true;
+    // A model limit carries no time to corroborate — its own remedy hint is
+    // the evidence, and the record only ever probes (never blind-wakes), so
+    // recording it cannot cause a premature resume.
+    if (resolved.limitType === 'model') return true;
+    return false;
+  }
+
+  // §7: upgrade a weak estimate (fallback/relative) when a better value
+  // becomes available. A strictly better source (e.g. fallback→absolute)
+  // always wins — absolute is truth even if later than a probe guess.
+  // Same-or-worse source may only pull the wake earlier, never push it later.
+  function maybeUpgrade(existing, at, source, bannerAt, limitType, via) {
+    if (!existing || existing.status !== 'stopped') return false;
+    const oldRank = sourceRank(existing.resetSource);
+    const newRank = sourceRank(source);
+    const betterSource = newRank > oldRank;
+    const earlier = at < existing.resetAt;
+    if (!betterSource && !earlier) return false;
+    if (!betterSource && at > existing.resetAt) return false;
+    updateState(state => {
+      const s = state.sessions[existing.key];
+      if (!s || s.status !== 'stopped') return;
+      s.resetAt = at;
+      s.resetSource = source;
+      if (bannerAt != null) s.bannerAt = bannerAt;
+      if (limitType && limitType !== 'unknown') s.limitType = limitType;
+      if (via) s.detectedVia = via;
+      if (source !== 'fallback') delete s.probeCount;
+    });
+    log(`pane ${pane}: upgraded reset ${existing.resetSource}→${source} at ${new Date(at).toISOString()}`);
+    return true;
+  }
+
+  async function recordLimit(resetLine, limitType, via) {
+    const resolved = resolveBanner(resetLine, limitType);
+    const detectedVia = resolved.via || via;
+    const { at, source } = computeReset(resolved.resetLine, resolved.bannerAt, resolved.detectedAt, resolved.limitType);
+    let muxSession = null;
+    if (typeof mux.sessionForPane === 'function') {
+      try { muxSession = await mux.sessionForPane(pane); } catch { muxSession = null; }
+    }
+    // Calibration sample prepared outside the lock; applied in the same
+    // updateState as the stop upsert (usage ladder ground-truth, 1.13).
+    let calSample = null;
+    try {
+      calSample = prepareCalibrationSample({
+        agent: agent.id,
+        limitType: resolved.limitType,
+        resetAtMs: Number.isFinite(at) ? at - RESET_MARGIN_MS : null,
+        now: resolved.detectedAt,
+      });
+    } catch { /* best-effort */ }
+    const recordEnv = agent.id === 'claude' ? claudeRecordEnv() : null;
+    let appliedKey = null;
+    upsertSession({
+      sessionId: resolved.sessionId, cwd, pane, mux: muxName, paneOwner, leaseId,
+      agent: agent.id, muxSession,
+      status: 'stopped', limitType: resolved.limitType, detectedVia,
+      detectedAt: resolved.detectedAt,
+      bannerAt: resolved.bannerAt,
+      resetAt: at, resetSource: source,
+      attempts: 0, lastAttemptAt: null, lastError: null,
+      ...(recordEnv ? { env: recordEnv } : {}),
+      ...(source === 'fallback' ? { probeCount: 0 } : {}),
+    }, {
+      after: (s, applied) => {
+        appliedKey = applied.key;
+        if (calSample) applyCalibrationToState(s, calSample);
+      },
+    });
+    // upsertSession may retain a pane-based key while learning a sessionId.
+    // Capture the exact record applied under the state lock; a lookup by pane
+    // is ambiguous when historical records exist for the same address.
+    trackedKey = appliedKey;
+    log(`pane ${pane}: limit recorded (${resolved.limitType}, via ${detectedVia}), resets ${new Date(at).toISOString()} (${source})`);
+    if (resolved.limitType === 'model') {
+      notifier(`${agent.name} hit a model limit — needs you`,
+        `${cwd} — ${modelRemedy(agent)}; unsnooze wakes it once the banner clears`,
+        { context: notifyCtx });
+    } else {
+      notifier(`${agent.name} hit a usage limit`, `${cwd} — auto-resume at ${new Date(at).toLocaleTimeString()}`, { context: notifyCtx });
+    }
+    spawnResumerIfNeeded();
+    return { at, source, resolved };
+  }
+
+  async function driveMenu(text) {
+    const steps = agent.menu.stepsToWait(text, PANE_SCAN_LINES);
+    if (steps === null) {
+      log(`pane ${pane}: rate-limit menu unreadable — NOT pressing Enter`);
+      return false;
+    }
+    const key = steps > 0 ? 'Down' : 'Up';
+    for (let i = 0; i < Math.abs(steps); i++) {
+      await mux.sendKey(pane, key);
+      await sleep(120);
+    }
+    await mux.sendKey(pane, 'Enter');
+    log(`pane ${pane}: selected "Stop and wait for limit to reset" (${steps} steps)`);
+    await sleep(1000);
+    // After selection the TUI prints the limit banner — next scrape records it.
+    return true;
+  }
+
+  async function handleOverload() {
+    if (overloadAttempt >= OVERLOAD_BACKOFF_S.length) {
+      log(`pane ${pane}: overload retries exhausted`);
+      overloadAttempt = 0;   // reset ladder; next marker starts fresh
+      return;
+    }
+    const base = OVERLOAD_BACKOFF_S[overloadAttempt] * 1000;
+    const jitter = base * OVERLOAD_JITTER * (Math.random() * 2 - 1);
+    const wait = Math.round(base + jitter);
+    overloadAttempt++;
+    log(`pane ${pane}: overload — retry ${overloadAttempt}/${OVERLOAD_BACKOFF_S.length} in ${Math.round(wait / 1000)}s`);
+    await sleep(wait);
+    if (!running) return;
+    const text = await mux.capturePane(pane, CAPTURE_LINES).catch(() => null);
+    if (text === null) return;
+    if (isBusy(text, agent.patterns.busyPatterns)) { log(`pane ${pane}: busy after overload wait — skip inject`); return; }
+    if (!overloadMatch(text, agent.patterns.overloadPatterns)) { overloadAttempt = 0; return; }   // recovered on its own
+    await mux.sendText(pane, 'Continue where you left off. The previous attempt failed with a transient API error.');
+    log(`pane ${pane}: overload retry message sent`);
+  }
+
+  async function tick() {
+    if (!(await mux.paneAlive(pane))) {
+      log(`pane ${pane}: gone — monitor exiting (record persists for resumer)`);
+      running = false;
+      return;
+    }
+
+    // F4: the pane can outlive the agent (in the user's own tmux the pane is
+    // their shell). The launcher removes the lease when the agent exits — a
+    // vanished lease means there is nothing left to watch, and continuing
+    // would scrape (and eventually type into) whatever now runs in the pane.
+    // The launcher writes the lease AFTER spawning us, so enforcement starts
+    // only once the lease has been seen.
+    if (leaseId) {
+      const lease = readLease({ mux: muxName, paneOwner, pane }, leaseId);
+      if (lease) leaseSeen = true;
+      else if (leaseSeen) {
+        log(`pane ${pane}: lease ${leaseId} gone — agent exited, monitor exiting`);
+        running = false;
+        return;
+      } else if (Date.now() - startedAt > leaseGraceMs) {
+        // No lease has EVER appeared. The launcher spawns us before it spawns
+        // the agent, so an agent that failed to spawn at all (bad bin, instant
+        // crash) leaves us watching a pane that is just the user's shell, with
+        // no lease-gone edge to ever fire. Without this the monitor scrapes
+        // that pane forever, and they pile up one per failed launch.
+        // Deliberately a deadline rather than a tick count: scrapeInterval is
+        // injected as 0 in tests and tunable in production, so N ticks is not
+        // a duration.
+        log(`pane ${pane}: lease ${leaseId} never appeared within ${leaseGraceMs}ms — agent never launched, monitor exiting`);
+        running = false;
+        return;
+      }
+    }
+
+    // A monitor is spawned once per pane and lives as long as the agent, so it
+    // routinely outlives an `npm i -g unsnooze`: the package on disk changes,
+    // this process keeps the modules it loaded at launch, and no supervisor
+    // exists to restart it. That is how 1.14.2's stop-completion fix reached a
+    // user's disk without ever reaching the process that completes stops — a
+    // pane launched five days earlier went on applying the deleted rule.
+    // Hand off to a replacement on fresh code and stand down.
+    //
+    // Ordering matters twice over. It runs AFTER the pane/lease checks, so an
+    // upgrade landing as the agent exits does not respawn a watcher onto the
+    // user's bare shell; and BEFORE consumeMarker(), which unlinks the event
+    // file — handing off after that would swallow the pending overload event.
+    if (await restartOnVersionSkew({
+      args: monitorSpawnArgs({ muxName, paneOwner, pane, agentId: agent.id, leaseId }),
+      env: { UNSNOOZE_CWD: cwd },
+      spawner, skewed: versionSkewed, binPath: handoffBin,
+      log: msg => log(`pane ${pane}: ${msg}`),
+    })) {
+      running = false;
+      return;
+    }
+
+    const marker = consumeMarker();
+    let text;
+    try {
+      text = await mux.capturePane(pane, CAPTURE_LINES);
+    } catch {
+      return;   // transient capture failure
+    }
+
+    // Interactive menu takes priority — it blocks the session until answered.
+    // Checked against the VISIBLE screen only: a menu in scrollback history
+    // was already answered, and re-driving it would inject stray keys.
+    const visible = mux.capturePaneVisible
+      ? await mux.capturePaneVisible(pane).catch(() => '')
+      : text;
+    if (agent.id === 'codex' && Object.values(readState().sessions).some(rec =>
+      rec.agent === 'codex' && rec.mux === muxName && rec.pane === pane
+      && rec.paneOwner === paneOwner && (rec.leaseId ?? null) === leaseId
+      && ['resuming', 'failed'].includes(rec.status)
+      && pendingCodexPrompt(visible, rec.pendingPrompt))) {
+      // The resumer owns this unsubmitted draft. Its old banner is not a new
+      // stop; refreshing detectedAt here would invalidate the submit retry.
+      firstTick = false;
+      return;
+    }
+    if (agent.menu && agent.menu.isPrompt(visible, PANE_SCAN_LINES)) {
+      if (!getConfig('menuAutoAnswer')) {
+        // Watch-only mode: record the stop (reset time may not be visible
+        // until the menu is answered — fallback covers that), touch nothing.
+        const state = readState();
+        const existing = trackedKey && state.sessions[trackedKey];
+        if (!existing || existing.status !== 'stopped') {
+          const d = detectLimit(text, PANE_SCAN_LINES, agent.patterns);
+          log(`pane ${pane}: limit menu detected but menuAutoAnswer is off — recording only`);
+          await recordLimit(d.hit ? d.resetLine : null, d.hit ? d.limitType : 'unknown', 'scrape');
+        }
+        firstTick = false;
+        return;
+      }
+      await driveMenu(visible);
+      firstTick = false;
+      return;
+    }
+
+    const d = detectLimit(text, PANE_SCAN_LINES, agent.patterns);
+    if (d.hit) {
+      const state = readState();
+      const existing = trackedKey && state.sessions[trackedKey];
+
+      // §7: still-stopped records can upgrade a weak estimate.
+      if (existing && existing.status === 'stopped') {
+        const resolved = resolveBanner(d.resetLine, d.limitType);
+        const via = resolved.via || (marker ? 'hook' : 'scrape');
+        const { at, source } = computeReset(resolved.resetLine, resolved.bannerAt, resolved.detectedAt, resolved.limitType);
+        maybeUpgrade(existing, at, source, resolved.bannerAt, resolved.limitType, via);
+        firstTick = false;
+        return;
+      }
+
+      if (!existing || existing.status !== 'stopped') {
+        const via = marker ? 'hook' : 'scrape';
+        // §6: first tick needs corroboration so we don't inherit a leftover banner.
+        if (firstTick) {
+          const resolved = resolveBanner(d.resetLine, d.limitType);
+          const detectedVia = resolved.via || via;
+          const { at, source } = computeReset(resolved.resetLine, resolved.bannerAt, resolved.detectedAt, resolved.limitType);
+          if (!isCorroborated({ ...resolved, via: detectedVia }, at, source)) {
+            log(`pane ${pane}: first tick banner uncorroborated (${source}) — skipping`);
+            firstTick = false;
+            return;
+          }
+          // Reuse recordLimit path; resolveBanner is idempotent enough.
+          await recordLimit(d.resetLine, d.limitType, via);
+          firstTick = false;
+          return;
+        }
+        await recordLimit(d.resetLine, d.limitType, via);
+      }
+      firstTick = false;
+      return;
+    }
+
+    // Non-resetting terminal errors (credits exhausted, membership expired,
+    // discontinued tiers): notify once per appearance, never touch the ledger —
+    // there is no reset to wait for. Re-arms when the error clears.
+    const term = overloadMatch(text, agent.patterns.terminalPatterns || []);
+    if (term) {
+      if (!terminalNotified) {
+        terminalNotified = true;
+        notifier(`${agent.name} needs attention ⚠️`, `${cwd} — ${term.line}`, { context: notifyCtx });
+        log(`pane ${pane}: terminal error (no auto-resume): ${term.line}`);
+      }
+    } else {
+      terminalNotified = false;
+    }
+
+    // A banner leaving the 12-line scan is not evidence of a resume: ordinary
+    // output (including background-agent notices) can scroll it away, and in
+    // Codex a keypress or tab switch can hide it while the session is still
+    // stopped. Claude is terminal only after its parent transcript records
+    // newer non-error assistant usage; Codex only after its rollout records
+    // newer model output (or, with no rollout to read, the legacy rule).
+    // Other adapters retain their legacy behavior until they expose an
+    // equally authoritative progress signal.
+    if (trackedKey) {
+      const state = readState();
+      const rec = state.sessions[trackedKey];
+      if (rec && rec.status === 'stopped') {
+        const cutoff = rec.bannerAt ?? rec.detectedAt;
+        const progressed = agent.id === 'claude' ? hasClaudeParentUsageAfter(rec, cutoff)
+          : agent.id === 'codex' ? hasCodexProgressAfter(rec, cutoff) !== false
+            : true;
+        if (progressed) {
+          const next = setStatus(trackedKey, 'resumed', {
+            lastAttemptAt: Date.now(), bannerCleared: true, lastError: null,
+          }, { expect: ['stopped'], expectCutoff: cutoff });
+          const applied = next.sessions[trackedKey];
+          if (applied?.status === 'resumed'
+            && (applied.bannerAt ?? applied.detectedAt) === cutoff) {
+            log(`pane ${pane}: post-limit progress observed, ${trackedKey} marked resumed`);
+            trackedKey = null;
+          }
+        }
+      }
+      if (rec && rec.status === 'resumed') {
+        setStatus(trackedKey, 'resumed', { bannerCleared: true }, { expect: ['resumed'] });
+        trackedKey = null;
+      } else if (rec && rec.status !== 'stopped') trackedKey = null;
+    }
+
+    // Overload marker (banner-less path).
+    if (marker && marker.kind === 'overload') {
+      await handleOverload();
+    } else if (!marker && overloadMatch(text, agent.patterns.overloadPatterns) && !isBusy(text, agent.patterns.busyPatterns)) {
+      await handleOverload();
+    }
+
+    firstTick = false;
+  }
+
+  return {
+    async run() {
+      // Stamp the build: a monitor can outlive several upgrades, so "which
+      // version is this process actually running" is the first question any
+      // log attachment has to answer.
+      log(`monitor started for pane ${pane} (cwd ${cwd}) — unsnooze ${PKG_VERSION}`);
+      while (running) {
+        await tick();
+        if (!running) break;
+        await sleep(scrapeInterval);
+      }
+    },
+    stop() { running = false; },
+    _tick: tick,   // exposed for tests
+    get trackedKey() { return trackedKey; },
+    get _firstTick() { return firstTick; },
+    get _running() { return running; },
+  };
+}
+
+export async function runMonitor(muxName, paneOwner, pane, agentId, leaseId) {
+  const cwd = process.env.UNSNOOZE_CWD || process.cwd();
+  const monitor = createMonitor({ muxName, paneOwner: paneOwner || null, pane, leaseId, cwd, agent: getAgent(agentId) });
+  await monitor.run();
+  return 0;
+}

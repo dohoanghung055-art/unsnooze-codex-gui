@@ -1,0 +1,453 @@
+// Session-file watcher — the tmux-free detection channel. Tails the files the
+// agent CLIs already write (Claude Code transcripts, Codex rollouts) for
+// limit-stop evidence, so sessions running in GUI surfaces (VS Code extension,
+// desktop apps) are tracked even though there is no pane to scrape and no
+// shell wrapper in the launch path. Records land in the same ledger with
+// pane-less records the resumer already reopens by session id.
+//
+// Offset semantics: on a cold start (no offsets file) every existing file
+// starts at EOF — history is never replayed as fresh stops. Files that appear
+// later are read from the start (a stop that happened while the daemon was
+// down is still a real stop); the freshness window drops anything old.
+
+import {
+  readdirSync, statSync, readFileSync, writeFileSync, renameSync, mkdirSync,
+  openSync, readSync, closeSync, existsSync,
+} from 'node:fs';
+import { join, sep, basename, dirname } from 'node:path';
+import { homedir } from 'node:os';
+import {
+  CLAUDE_DIR, CODEX_DIR, WATCH_OFFSETS_FILE, WATCH_FRESHNESS_MS,
+  RESET_MARGIN_MS, PROBE_INTERVAL_MS, isPrimeDir,
+} from './config.js';
+import { getMultiplexer } from './multiplexer.js';
+import { parseTranscriptLine } from './watchers/claude.js';
+import { parseRolloutLines, rolloutMeta } from './watchers/codex.js';
+import { ROLLOUT_RE, rolloutId } from './agents/codex.js';
+import { parseResetTime, resetAtMs, sourceRank } from './time-parser.js';
+import { getAgent } from './agents/index.js';
+import { modelRemedy } from './patterns.js';
+import { upsertSession, readState, updateState } from './state.js';
+import { getConfig } from './settings.js';
+import { notify } from './notify.js';
+import { makeLogger } from './logger.js';
+import {
+  extractClaudeUsage, extractCodexUsage,
+  readUsageStore, writeUsageStore, accumulateUsageSamples,
+  prepareCalibrationSample, applyCalibrationToState,
+  collectClaudeSamples, collectCodexSamples,
+} from './usage.js';
+
+const log = makeLogger('watcher');
+
+const MAX_WALK_DEPTH = 8;
+// A file first seen mid-run is read from the start, but never more than this —
+// a giant transcript is history, and the freshness window drops it anyway.
+const MAX_READ_BYTES = 10 * 1024 * 1024;
+
+export function claudeSource({ roots }) {
+  return {
+    agent: 'claude',
+    roots,
+    enabled: () => getConfig('agents.claude'),
+    // Limit-stop detection still skips subagents (duplicate parent entry).
+    // Usage accumulation uses a separate match that INCLUDES subagents
+    // (account-pooled burn — see usage.js collectClaudeSamples).
+    match: p => p.endsWith('.jsonl') && !p.split(sep).includes('subagents'),
+    // Also walk subagent files for usage-only extraction (no stop candidates).
+    usageMatch: p => p.endsWith('.jsonl') && (
+      !p.split(sep).includes('subagents')
+        ? /^[0-9a-f-]{36}\.jsonl$/i.test(basename(p))
+        : /agent-.*\.jsonl$/i.test(basename(p))
+    ),
+    parse(lines) {
+      return lines
+        .map(parseTranscriptLine)
+        .filter(Boolean)
+        .map(rec => ({
+          agent: 'claude',
+          sessionId: rec.sessionId,
+          cwd: rec.cwd,
+          limitType: rec.limitType,
+          resetLine: rec.resetLine,
+          resetAt: null,
+          origin: rec.entrypoint,
+          timestampMs: rec.timestampMs,
+        }));
+    },
+    usage(lines) {
+      return lines.map(extractClaudeUsage).filter(Boolean);
+    },
+  };
+}
+
+export function codexSource({ roots }) {
+  return {
+    agent: 'codex',
+    roots,
+    enabled: () => getConfig('agents.codex'),
+    match: p => ROLLOUT_RE.test(basename(p)),
+    parse(lines, path, { offset } = {}) {
+      const hits = parseRolloutLines(lines, { path, offset });
+      if (hits.length === 0) return [];
+      const last = hits[hits.length - 1];   // the latest snapshot or limit error governs
+      const meta = rolloutMeta(path);
+      return [{
+        agent: 'codex',
+        sessionId: meta.sessionId,
+        cwd: meta.cwd,
+        limitType: last.limitType,
+        // Banner text from a persisted task_complete error; parsed by
+        // dispatchCandidate exactly like a scraped pane when no epoch is known.
+        resetLine: last.resetLine || null,
+        resetAt: last.resetAt,
+        reason: last.reachedType || null,
+        origin: meta.originator,
+        timestampMs: last.timestampMs,
+      }];
+    },
+    usage(lines, path) {
+      const rollout = rolloutId(path);
+      return lines.map(line => extractCodexUsage(line, { rollout })).filter(Boolean);
+    },
+  };
+}
+
+// Claude desktop (cowork) sessions are sandboxed: each runs against an
+// isolated CLAUDE_CONFIG_DIR at <session>/local_<id>/.claude, so the global
+// hook never fires and the transcripts live outside ~/.claude. Reviving one
+// needs that same CLAUDE_CONFIG_DIR exported — carried on the record as env —
+// plus CLAUDE_SECURESTORAGE_CONFIG_DIR='' so auth stays on the DEFAULT
+// keychain entry: the service name is otherwise derived from the config dir,
+// and the sandbox holds no credentials (verified against a real cowork
+// session: with the pair set, `claude -p --resume <id>` answers; without the
+// override it dies with "Not logged in").
+// Experimental: desktop worktree/VM sessions may still differ.
+export function claudeDesktopSource({ roots }) {
+  const base = claudeSource({ roots });
+  return {
+    ...base,
+    parse(lines, path) {
+      const configDir = configDirFromPath(path);
+      return base.parse(lines, path).map(rec => ({
+        ...rec,
+        origin: 'desktop',
+        env: configDir
+          ? { CLAUDE_CONFIG_DIR: configDir, CLAUDE_SECURESTORAGE_CONFIG_DIR: '' }
+          : undefined,
+      }));
+    },
+  };
+}
+
+function configDirFromPath(path) {
+  const marker = `${sep}.claude${sep}`;
+  const idx = path.indexOf(marker);
+  return idx === -1 ? null : path.slice(0, idx + marker.length - 1);
+}
+
+export function defaultSources() {
+  const sources = [
+    claudeSource({ roots: [join(CLAUDE_DIR, 'projects')] }),
+    codexSource({ roots: [join(CODEX_DIR, 'sessions')] }),
+  ];
+  if (process.platform === 'darwin') {
+    sources.push(claudeDesktopSource({
+      roots: [process.env.UNSNOOZE_CLAUDE_DESKTOP_DIR
+        || join(homedir(), 'Library', 'Application Support', 'Claude', 'local-agent-mode-sessions')],
+    }));
+  }
+  return sources;
+}
+
+// Turn a watcher candidate into a ledger record. No pane key at all — a merge
+// into an existing scrape/hook record must never clobber a live pane id.
+//
+// The same stop is re-emitted whenever the CLI appends another limit line (a
+// GUI auto-retry, or the revived session hitting the still-active limit), so
+// an existing record's lifecycle must be respected: an active record only
+// gets its reset time refreshed — never its status/attempts reset, or the
+// MAX_RESUME_ATTEMPTS cap could never bind — and a cancelled record stays
+// cancelled.
+export function dispatchCandidate(c) {
+  // A window prime's own rollout (prime.js runs codex in PRIME_DIR) hitting a
+  // limit is not a session — reviving it would spend quota on nothing.
+  if (isPrimeDir(c.cwd)) return;
+  const detectedAt = c.timestampMs || Date.now();
+  const bannerAt = c.timestampMs || null;
+  let at, source;
+  if (c.resetAt) {
+    at = c.resetAt + RESET_MARGIN_MS;
+    source = 'absolute';
+  } else {
+    ({ at, source } = resetAtMs(parseResetTime(c.resetLine), {
+      marginMs: RESET_MARGIN_MS,
+      fallbackMs: PROBE_INTERVAL_MS,
+      now: new Date(detectedAt),
+      bannerAt,
+    }));
+  }
+
+  const existing = c.sessionId
+    ? Object.values(readState().sessions).find(s => s.sessionId === c.sessionId)
+    : null;
+  if (existing && existing.status === 'cancelled') return;
+  if (existing && (existing.status === 'stopped' || existing.status === 'resuming')) {
+    let kept = false;
+    updateState(state => {
+      const s = state.sessions[existing.key];
+      if (s && (s.status === 'stopped' || s.status === 'resuming')) {
+        // A weaker estimate never replaces a stronger one that still stands —
+        // the rule monitor.js §7 and upsertSession's merge already apply. One
+        // Codex stop's token_count line and its task_complete error can land
+        // in different ticks, and a "Try again later." banner must not turn
+        // the exact epoch the snapshot gave into a 15-minute probe.
+        kept = sourceRank(source) < sourceRank(s.resetSource) && s.resetAt > Date.now();
+        if (!kept) {
+          s.resetAt = at;
+          s.resetSource = source;
+          if (c.limitType && c.limitType !== 'unknown') s.limitType = c.limitType;
+          // The reason belongs to the stop it came with: a later plain stop
+          // must not keep reporting an earlier workspace wall.
+          if (c.reason) s.limitReason = c.reason;
+          else delete s.limitReason;
+        }
+        if (bannerAt != null) s.bannerAt = bannerAt;
+      }
+    });
+    log(kept
+      ? `kept the stronger reset for tracked stop: session=${c.sessionId} (${source} would have replaced it)`
+      : `refreshed reset for tracked stop: session=${c.sessionId} resetAt=${new Date(at).toISOString()}`);
+    return;
+  }
+
+  const record = {
+    sessionId: c.sessionId || null,
+    cwd: c.cwd || null,
+    agent: c.agent,
+    origin: c.origin || null,
+    mux: getMultiplexer().name, paneOwner: null, leaseId: null,
+    // GUI/transcript records have no pane — session is discovered on revival.
+    muxSession: null,
+    status: 'stopped',
+    limitType: c.limitType || 'unknown',
+    detectedVia: 'transcript',
+    detectedAt,
+    bannerAt,
+    resetAt: at,
+    resetSource: source,
+    attempts: 0,
+    lastAttemptAt: null,
+    lastError: null,
+  };
+  if (c.env) record.env = c.env;   // e.g. CLAUDE_CONFIG_DIR for sandboxed desktop sessions
+  // e.g. Codex's rate_limit_reached_type. Cleared explicitly when absent:
+  // upsertSession merges into an older record of the same session.
+  if (c.reason) record.limitReason = c.reason;
+  else if (existing?.limitReason) record.limitReason = null;
+  // Raw reset without margin for calibration window math.
+  const rawResetMs = c.resetAt != null
+    ? c.resetAt
+    : (Number.isFinite(at) ? at - RESET_MARGIN_MS : null);
+  let calSample = null;
+  try {
+    calSample = prepareCalibrationSample({
+      agent: c.agent,
+      limitType: record.limitType,
+      resetAtMs: rawResetMs,
+      now: detectedAt,
+    });
+  } catch (err) {
+    log(`calibration prepare failed: ${err.message}`);
+  }
+  upsertSession(record, {
+    after: calSample ? (state) => applyCalibrationToState(state, calSample) : null,
+  });
+  log(`limit stop via transcript: agent=${c.agent} session=${c.sessionId || '?'} origin=${c.origin || '?'} resetAt=${new Date(at).toISOString()} (${source})${c.reason ? ` reason=${c.reason}` : ''}`);
+  // A model limit (a Codex workspace wall, say) is not lifted by waiting, so
+  // "resumes when the limit resets" would be a promise nothing keeps — say
+  // what it needs instead, as the pane monitor does.
+  if (record.limitType === 'model') {
+    const agent = getAgent(c.agent);
+    notify(`${agent.name} hit a model limit — needs you`, `${c.cwd || c.agent}: ${modelRemedy(agent)}`);
+  } else {
+    notify('limit hit 😴', `${c.cwd || c.agent}: tracked — resumes when the limit resets`);
+  }
+}
+
+function loadOffsets(path) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf-8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readRange(path, from, to) {
+  let fd;
+  try {
+    fd = openSync(path, 'r');
+    const len = Math.min(to - from, MAX_READ_BYTES);
+    const buf = Buffer.alloc(len);
+    let read = 0;
+    while (read < len) {
+      const n = readSync(fd, buf, read, len - read, from + read);
+      if (n <= 0) break;
+      read += n;
+    }
+    return buf.subarray(0, read);
+  } catch {
+    return Buffer.alloc(0);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+export function createWatcher({
+  sources = defaultSources(),
+  offsetsPath = WATCH_OFFSETS_FILE,
+  freshnessMs = WATCH_FRESHNESS_MS,
+  onStop = dispatchCandidate,
+  now = Date.now,
+} = {}) {
+  let offsets = loadOffsets(offsetsPath);
+  let coldStart = offsets === null;
+  if (coldStart) offsets = {};
+  let dirty = coldStart;
+
+  function setOffset(path, value) {
+    if (offsets[path] !== value) { offsets[path] = value; dirty = true; }
+  }
+
+  function saveOffsets(seen) {
+    // Unseen ≠ gone: a source may be disabled this tick or a root transiently
+    // unreadable — wiping those offsets would replay history on re-enable.
+    // Only forget files that no longer exist.
+    for (const key of Object.keys(offsets)) {
+      if (!seen.has(key) && !existsSync(key)) { delete offsets[key]; dirty = true; }
+    }
+    if (!dirty) return;
+    try {
+      mkdirSync(dirname(offsetsPath), { recursive: true, mode: 0o700 });
+      const tmp = join(dirname(offsetsPath), `.offsets.tmp.${process.pid}`);
+      writeFileSync(tmp, JSON.stringify(offsets), { mode: 0o600 });
+      renameSync(tmp, offsetsPath);
+      dirty = false;
+    } catch (err) {
+      log(`offsets save failed: ${err.message}`);
+    }
+  }
+
+  // Appended complete lines since the last tick, advancing the stored offset.
+  // All offset math in bytes (a \n byte can't occur inside a multibyte char).
+  function readAppended(path) {
+    let size;
+    try { size = statSync(path).size; } catch { return null; }
+    const known = Object.prototype.hasOwnProperty.call(offsets, path);
+    let offset;
+    if (!known) {
+      if (coldStart) { setOffset(path, size); return null; }
+      offset = Math.max(0, size - MAX_READ_BYTES);
+    } else {
+      offset = offsets[path];
+    }
+    // Nothing new, or rewritten shorter (rotate/truncate) — pin to EOF.
+    if (size <= offset) { setOffset(path, size); return null; }
+    const buf = readRange(path, offset, size);
+    const lastNl = buf.lastIndexOf(0x0a);
+    if (lastNl === -1) { setOffset(path, offset); return null; }  // partial line — wait
+    setOffset(path, offset + lastNl + 1);
+    return {
+      offset,
+      lines: buf.subarray(0, lastNl + 1).toString('utf-8').split('\n').filter(l => l.trim()),
+    };
+  }
+
+  function walk(dir, depth, cb) {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) {
+        if (depth < MAX_WALK_DEPTH) walk(p, depth + 1, cb);
+        continue;
+      }
+      if (e.isFile()) cb(p);
+    }
+  }
+
+  return {
+    async tick() {
+      const seen = new Set();
+      const candidates = [];
+      const usageSamples = [];
+      for (const source of sources) {
+        if (source.enabled && !source.enabled()) continue;
+        for (const root of source.roots) {
+          walk(root, 0, path => {
+            // Stop detection match (excludes Claude subagents).
+            const stopMatch = source.match(path);
+            // Usage match may include subagents; falls back to stop match.
+            const usageMatch = source.usageMatch ? source.usageMatch(path) : stopMatch;
+            if (!stopMatch && !usageMatch) return;
+            seen.add(path);
+            const appended = readAppended(path);
+            if (!appended || appended.lines.length === 0) return;
+            const { lines, offset } = appended;
+            if (stopMatch) {
+              try {
+                candidates.push(...source.parse(lines, path, { offset }));
+              } catch (err) {
+                log(`parse error in ${path}: ${err.message}`);
+              }
+            }
+            if (usageMatch && typeof source.usage === 'function') {
+              try {
+                usageSamples.push(...source.usage(lines, path));
+              } catch (err) {
+                log(`usage parse error in ${path}: ${err.message}`);
+              }
+            }
+          });
+        }
+      }
+      // Cold start seeds offsets at EOF → accumulator would see zero history.
+      // One mtime-filtered tail-read pass fills the current-window baseline.
+      const wasCold = coldStart;
+      coldStart = false;
+      saveOffsets(seen);
+
+      try {
+        const store = readUsageStore();
+        if (wasCold && (store.samples || []).length === 0) {
+          const seeded = [
+            ...collectClaudeSamples({ now: now() }),
+            ...collectCodexSamples({ now: now() }),
+          ];
+          if (seeded.length > 0) accumulateUsageSamples(store, seeded, { now: now() });
+        }
+        if (usageSamples.length > 0) {
+          accumulateUsageSamples(store, usageSamples, { now: now() });
+        }
+        if (wasCold || usageSamples.length > 0) writeUsageStore(store);
+      } catch (err) {
+        log(`usage accumulate failed: ${err.message}`);
+      }
+
+      // Strict freshness: a candidate without a parseable timestamp cannot be
+      // dated, and dispatching it risks reviving a long-finished session (the
+      // offsets can legitimately replay old lines after a file reappears).
+      // Every real transcript/rollout line carries an ISO timestamp.
+      const fresh = [];
+      for (const c of candidates) {
+        if (Number.isFinite(c.timestampMs) && now() - c.timestampMs <= freshnessMs) fresh.push(c);
+        else log(`dropped stale/undatable candidate: agent=${c.agent} session=${c.sessionId || '?'} ts=${c.timestampMs}`);
+      }
+      for (const c of fresh) {
+        try { onStop(c); } catch (err) { log(`onStop failed: ${err.message}`); }
+      }
+      return fresh.length;
+    },
+  };
+}

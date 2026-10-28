@@ -1,0 +1,531 @@
+// `unsnooze doctor [--fix]` — health check + csg (claude-session-guard)
+// migration sweep. npm has no successor mechanism and `-g` uninstall hooks are
+// unreliable, so the ONLY robust cleanup of the pre-release csg install is
+// unsnooze itself finding and retiring its leftovers: zombie csg monitors/
+// resumers, an old launchd/systemd unit, the orphaned state dir, the stale
+// global package. Everything is injectable for tests; --fix never deletes
+// data (the state dir is archived) and never runs npm (hint only).
+
+import { readFileSync, readdirSync, renameSync, existsSync, unlinkSync, lstatSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { CLAUDE_SETTINGS, RESUMER_LOCK, STATE_DIR, scanStateDir, narrowStateDir } from './config.js';
+import { getMultiplexer } from './multiplexer.js';
+import { makeLogger } from './logger.js';
+import { shouldUseTui, formatDoctorTui } from './tui.js';
+import { designRegisteredOffline } from './design.js';
+import { powershellProfilePath } from './powershell.js';
+import { fishConfigPath } from './fish.js';
+import { listAgents } from './agents/index.js';
+import { getConfig } from './settings.js';
+import { resolveBin } from './which.js';
+import { CLAUDE_DIR, CODEX_DIR } from './config.js';
+
+const log = makeLogger('doctor');
+
+const CSG_PROCESS_RE = /\bcsg\.js\s+_?(?:monitor|resumer|run|daemon|hook)/;
+// A unit is csg-legacy when it execs csg.js, or mentions claude-session-guard
+// WITHOUT execing unsnooze — the dev repo kept the old folder name after the
+// rename, so a live unsnooze daemon plist can legitimately have
+// .../claude-session-guard/bin/unsnooze.js in its path. Flagging that would
+// let --fix destroy the running daemon.
+function isCsgUnit(content) {
+  if (/csg\.js/.test(content)) return true;
+  return /claude-session-guard/.test(content) && !/unsnooze\.js|com\.unsnooze/.test(content);
+}
+
+function defaultRunner(cmd, args) {
+  try {
+    return spawnSync(cmd, args, { encoding: 'utf-8' });
+  } catch (err) {
+    return { status: 1, stdout: '', error: err };
+  }
+}
+
+// --- detections ---------------------------------------------------------------
+
+/** Live csg-era processes (monitors/resumers/daemons). */
+export function findCsgProcesses({ runner = defaultRunner } = {}) {
+  const r = runner('ps', ['-axo', 'pid=,command=']);
+  if (r.error || r.status !== 0) return [];
+  return String(r.stdout || '').split('\n')
+    .map(line => line.trim())
+    .filter(line => CSG_PROCESS_RE.test(line))
+    .map(line => {
+      const m = line.match(/^(\d+)\s+(.*)$/);
+      return m ? { pid: Number(m[1]), command: m[2] } : null;
+    })
+    .filter(Boolean);
+}
+
+/** launchd plists / systemd units that exec csg (never the unsnooze one). */
+export function findCsgAutostarts({ dir = defaultLaunchAgentsDir() } = {}) {
+  try {
+    return readdirSync(dir)
+      .filter(name => name.endsWith('.plist') || name.endsWith('.service'))
+      .map(name => join(dir, name))
+      .filter(path => {
+        try { return isCsgUnit(readFileSync(path, 'utf-8')); }
+        catch { return false; }
+      });
+  } catch {
+    return [];   // dir missing — nothing installed
+  }
+}
+
+function defaultLaunchAgentsDir(platform = process.platform) {
+  if (platform === 'darwin') {
+    return process.env.UNSNOOZE_LAUNCH_AGENTS_DIR || join(homedir(), 'Library', 'LaunchAgents');
+  }
+  return process.env.UNSNOOZE_SYSTEMD_USER_DIR || join(homedir(), '.config', 'systemd', 'user');
+}
+
+// The stale global package. `command -v csg` is NOT enough: after the rename
+// the repo has no bin/csg.js, so the global `csg` symlink dangles and shells
+// skip it — but the package entry in node_modules is still there (often as an
+// npm-link). lstat sees the entry even when the symlink target is gone.
+export function defaultCsgPackagePath({
+  runner = defaultRunner,
+  execPathRoots = [join(dirname(dirname(process.execPath)), 'lib', 'node_modules')],
+} = {}) {
+  const roots = [];
+  const r = runner('npm', ['root', '-g']);
+  if (!r.error && r.status === 0 && r.stdout) roots.push(String(r.stdout).trim());
+  roots.push(...execPathRoots);   // nvm/unix prefix layout fallback when npm is slow/absent
+  for (const root of roots) {
+    if (!root) continue;
+    const candidate = join(root, 'claude-session-guard');
+    try { lstatSync(candidate); return candidate; } catch { /* not here */ }
+  }
+  return null;
+}
+
+function defaultHookInstalled(settingsPath = CLAUDE_SETTINGS) {
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    return (settings.hooks?.StopFailure || []).some(entry =>
+      (entry.hooks || []).some(h => /unsnooze\.js"? _hook-stopfailure/.test(h.command || '')));
+  } catch {
+    return false;
+  }
+}
+
+const WRAPPER_MARK = '# >>> unsnooze >>>';
+
+function readOrEmpty(path) {
+  try { return readFileSync(path, 'utf-8'); } catch { return ''; }
+}
+
+// The wrapper shadowing the real CLI is unsnooze's entry point, so "are the
+// wrappers installed" is a health question — but it has to be asked of the
+// right file. A PowerShell user has no ~/.zshrc, so checking only the POSIX rc
+// files made every native-Windows `unsnooze doctor` report the wrappers
+// missing and point the user at an install they had already run. A fish user
+// has no POSIX rc wrapper either — their block lives in the fish config.
+function defaultWrappersInstalled({
+  platform = process.platform,
+  rcContent = readOrEmpty,
+  profileContent = null,
+} = {}) {
+  const rcs = [join(homedir(), '.zshrc'), join(homedir(), '.bashrc'), fishConfigPath()];
+  if (rcs.some(rc => rcContent(rc).includes(WRAPPER_MARK))) return true;
+  if (platform !== 'win32') return false;
+  const readProfile = profileContent
+    || (() => {
+      const p = powershellProfilePath({ platform });
+      return p ? readOrEmpty(p) : '';
+    });
+  return readProfile().includes(WRAPPER_MARK);
+}
+
+function daemonRunning() {
+  try {
+    const pid = parseInt(readFileSync(RESUMER_LOCK, 'utf-8'), 10);
+    if (!Number.isFinite(pid)) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// --- report ---------------------------------------------------------------------
+
+/**
+ * Run every check. Findings: { id, kind: 'legacy'|'health'|'info', title,
+ * detail, fix? } — `fix` is a machine-actionable descriptor consumed by
+ * applyFixes. healthy === no legacy and no health findings.
+ */
+// Both delegate to config.js's walk: the reporter and the automatic repair
+// must never disagree about what counts as exposed, which is exactly what
+// happened when each had its own idea of where to look.
+export function findExposedStateFiles(dir = STATE_DIR, opts = {}) {
+  return scanStateDir(dir, opts).map(e => ({ ...e, mode: e.mode.toString(8) }));
+}
+
+// Deliberately NOT given runDoctor's `platform`. Every other check uses that
+// to simulate an install target — "what would doctor say on Windows?" — but
+// whether mode bits mean anything is a fact about the filesystem actually
+// under the process, not about the platform being simulated. Passing the
+// simulated one made a `platform: 'darwin'` test raise this finding while
+// running on a Windows runner, where the modes are synthetic and no repair
+// could ever clear it. scanStateDir keeps its own injectable platform for
+// direct unit tests.
+
+export function narrowStateModes(entries) {
+  return narrowStateDir(entries);
+}
+
+export async function runDoctor({
+  runner = defaultRunner,
+  platform = process.platform,
+  launchAgentsDir = defaultLaunchAgentsDir(platform),
+  csgStateDir = join(homedir(), '.claude-session-guard'),
+  csgBinPath = defaultCsgPackagePath({ runner }),
+  mux = getMultiplexer(),
+  designRegistered = designRegisteredOffline,
+  hookInstalled = defaultHookInstalled,
+  wrappersInstalled = defaultWrappersInstalled,
+  rcContent = undefined,
+  profileContent = undefined,
+  autostartDir = null,
+  stateDir = STATE_DIR,
+  env = process.env,
+  exists = existsSync,
+  agents = listAgents(),
+  enabled = id => !!getConfig(`agents.${id}`),
+  inUse = agentInUse,
+} = {}) {
+  const findings = [];
+
+  const procs = findCsgProcesses({ runner });
+  if (procs.length) {
+    findings.push({
+      id: 'csg-processes', kind: 'legacy',
+      title: `${procs.length} old csg process(es) still running`,
+      detail: procs.map(p => `  pid ${p.pid}: ${p.command}`).join('\n'),
+      fix: { action: 'kill-processes', pids: procs.map(p => p.pid) },
+    });
+  }
+
+  const units = findCsgAutostarts({ dir: launchAgentsDir });
+  if (units.length) {
+    findings.push({
+      id: 'csg-autostart', kind: 'legacy',
+      title: 'old csg daemon autostart unit(s) present',
+      detail: units.map(u => `  ${u}`).join('\n'),
+      fix: { action: 'remove-units', units, platform },
+    });
+  }
+
+  if (existsSync(csgStateDir)) {
+    findings.push({
+      id: 'csg-state-dir', kind: 'legacy',
+      title: `old csg state dir at ${csgStateDir}`,
+      detail: '  contains the pre-rename ledger/logs; superseded by ~/.unsnooze',
+      fix: { action: 'archive-dir', dir: csgStateDir },
+    });
+  }
+
+  if (csgBinPath) {
+    findings.push({
+      id: 'csg-package', kind: 'legacy',
+      title: `old claude-session-guard package still installed (${csgBinPath})`,
+      detail: '  run: npm rm -g claude-session-guard',
+      // npm owns the package (it may even be an npm-link to a dev repo) —
+      // doctor only ever hints, never runs npm.
+    });
+  }
+
+  // install only writes the hook for an enabled claude, so a codex-only
+  // setup must not be told to run an install that can never clear this.
+  if (enabled('claude') && !hookInstalled()) {
+    findings.push({
+      id: 'hook-missing', kind: 'health',
+      title: 'Claude StopFailure hook is not installed',
+      detail: '  run: unsnooze install --yes',
+    });
+  }
+  if (!wrappersInstalled({ platform, ...(rcContent ? { rcContent } : {}), ...(profileContent ? { profileContent } : {}) })) {
+    findings.push({
+      id: 'wrappers-missing', kind: 'health',
+      title: 'shell wrappers are not installed',
+      detail: '  run: unsnooze install --yes  (then: exec $SHELL)',
+    });
+  }
+  // The state dir is repaired on every write, but chmod is swallowed there —
+  // a filesystem that cannot honour it (FAT, some network mounts) would
+  // otherwise leave everything world-readable with nothing ever saying so.
+  // This is the place that says so, and --fix retries the chmod.
+  const exposed = findExposedStateFiles(stateDir);
+  if (exposed.length) {
+    findings.push({
+      id: 'state-permissions', kind: 'health',
+      title: `${exposed.length} file(s) in ${stateDir} are readable by other users`,
+      detail: exposed.slice(0, 8).map(e => `  ${e.mode} ${e.rel}`).join('\n')
+        + (exposed.length > 8 ? `\n  …and ${exposed.length - 8} more` : '')
+        + '\n  run: unsnooze doctor --fix',
+      fix: { action: 'narrow-state-modes', entries: exposed },
+    });
+  }
+
+  let muxOk = false;
+  try { muxOk = !!mux.available(); } catch { muxOk = false; }
+  if (!muxOk) {
+    findings.push({
+      id: 'mux-missing', kind: 'health',
+      title: `${mux.name || 'tmux'} is not installed — limit-watch and revival are off`,
+      detail: `  install ${mux.name || 'tmux'} to enable auto-resume`,
+    });
+  }
+
+  // The daemon reaches tmux through PATH, and launchd/systemd hand it a
+  // minimal one — so a unit that bakes the wrong PATH revives nothing while
+  // looking perfectly healthy from here. Lazy import: install.js imports this
+  // module, so a static import would cycle (same reason resumer.js defers
+  // prompt-queue.js).
+  try {
+    const { daemonPathBroken } = await import('./install.js');
+    const broken = daemonPathBroken({ platform, dir: autostartDir, muxBin: mux.name || 'tmux' });
+    if (broken) {
+      findings.push({
+        id: 'daemon-path', kind: 'health',
+        title: `daemon autostart cannot find ${broken.muxBin} — every revival will fail`,
+        detail: `  ${broken.unit}\n  baked PATH: ${broken.path}\n`
+          + `  run: unsnooze doctor --fix   (or: unsnooze install --daemon from your shell)`,
+        fix: { action: 'heal-daemon-path', platform, dir: autostartDir },
+      });
+    }
+  } catch { /* best-effort: a PATH check must never break doctor */ }
+
+  // What each enabled agent would actually be launched as — resolved the way
+  // the launcher resolves it, from this environment. #25 was a daemon whose
+  // logon-time PATH no longer named the Codex runtime directory; every revival
+  // died with ENOENT and nothing said so until the headless log was read.
+  // Doctor cannot see the daemon's environment, only its own, so on Windows
+  // it also says how the two can differ.
+  for (const f of agentBinFindings({ platform, env, exists, agents, enabled, inUse })) findings.push(f);
+
+  findings.push({
+    id: 'daemon', kind: 'info',
+    title: daemonRunning() ? 'resumer/daemon: running' : 'resumer/daemon: not running (starts on the next limit stop)',
+    detail: '',
+  });
+
+  // Claude Design (issue #13). Informational only — Design is optional, so a
+  // machine without it is not unhealthy. Read from config rather than
+  // `claude mcp list`, which health-checks every server and would put seconds
+  // onto every doctor run.
+  findings.push({
+    id: 'claude-design', kind: 'info',
+    title: designRegistered()
+      ? 'Claude Design: MCP server registered (run `unsnooze design` to check sign-in)'
+      : 'Claude Design: not set up (optional — `unsnooze design setup`)',
+    detail: '',
+  });
+
+  const healthy = findings.every(f => f.kind === 'info');
+  return { findings, healthy };
+}
+
+// claude and codex are enabled by default, so "enabled" does not mean "used
+// here": a machine that has only ever run one of them has nothing of the
+// other's to revive, and must not be reported unhealthy for lacking its
+// binary. Their own data directories say whether they have run here. The
+// other agents are opt-in; the user switching one on is evidence enough.
+const AGENT_HOMES = { claude: CLAUDE_DIR, codex: CODEX_DIR };
+export function agentInUse(id, { exists = existsSync } = {}) {
+  const home = AGENT_HOMES[id];
+  return home ? exists(home) : true;
+}
+
+export function agentBinFindings({
+  platform = process.platform, env = process.env, exists = existsSync,
+  agents = listAgents(), enabled = id => !!getConfig(`agents.${id}`),
+  inUse = agentInUse,
+} = {}) {
+  const findings = [];
+  const envVar = id => `UNSNOOZE_${String(id).toUpperCase()}_BIN`;
+  // One command, never `a && b`: && only exists from PowerShell 7, and the
+  // Windows PowerShell 5.1 that ships with the OS is a supported shell.
+  const windowsNote = platform === 'win32'
+    ? `\n  the daemon keeps the PATH of whatever started it; once this shell finds the agent,\n`
+      + `  restart it from here with: unsnooze install --daemon   (or sign out and back in)`
+    : '';
+  for (const agent of agents) {
+    if (!agent?.id || !enabled(agent.id)) continue;
+    const bin = agent.bin;
+    let resolved = null;
+    try { resolved = resolveBin(bin, { env, exists, platform }); } catch { resolved = null; }
+    if (resolved?.launchable) {
+      findings.push({
+        id: `agent-bin-${agent.id}`, kind: 'info',
+        title: `${agent.id}: ${resolved.path}`,
+        detail: '',
+      });
+    } else if (resolved) {
+      findings.push({
+        id: `agent-bin-${agent.id}`, kind: 'health',
+        title: `${agent.id} resolves to ${resolved.path}, a .cmd/.bat shim that cannot be launched directly`,
+        detail: `  set ${envVar(agent.id)} to the agent's .exe`,
+      });
+    } else if (!inUse(agent.id)) {
+      findings.push({
+        id: `agent-bin-${agent.id}`, kind: 'info',
+        title: `${agent.id}: not installed (no ${agent.id} sessions here to revive)`,
+        detail: '',
+      });
+    } else {
+      findings.push({
+        id: `agent-bin-${agent.id}`, kind: 'health',
+        title: `${agent.id} is not launchable from this environment (${bin} not found)`,
+        detail: `  every revival of a ${agent.id} session will fail with ENOENT\n`
+          + `  install it, put it on PATH, or set ${envVar(agent.id)}${windowsNote}`,
+      });
+    }
+  }
+  return findings;
+}
+
+// --- fixes ------------------------------------------------------------------------
+
+function defaultKill(pid) {
+  try { process.kill(pid, 'SIGTERM'); return true; } catch { return false; }
+}
+
+/** Apply the machine-actionable fixes from a runDoctor report. */
+export async function applyFixes(report, {
+  kill = defaultKill,
+  runner = defaultRunner,
+  now = Date.now(),
+  resolvePath = undefined,
+  currentPath = undefined,
+  activate = undefined,
+} = {}) {
+  const actions = [];
+  for (const finding of report.findings) {
+    const fix = finding.fix;
+    if (!fix) continue;
+    if (fix.action === 'kill-processes') {
+      for (const pid of fix.pids) {
+        kill(pid);
+        actions.push({ action: 'killed', pid });
+        log(`doctor: SIGTERM csg process ${pid}`);
+      }
+    } else if (fix.action === 'remove-units') {
+      for (const unit of fix.units) {
+        if (fix.platform === 'darwin') runner('launchctl', ['unload', unit]);
+        else runner('systemctl', ['--user', 'disable', '--now', unit]);
+        try { unlinkSync(unit); } catch { /* already gone */ }
+        actions.push({ action: 'removed-unit', unit });
+        log(`doctor: removed csg autostart ${unit}`);
+      }
+    } else if (fix.action === 'heal-daemon-path') {
+      const { healDaemonAutostart } = await import('./install.js');
+      const healed = healDaemonAutostart({
+        platform: fix.platform, dir: fix.dir,
+        ...(resolvePath ? { resolvePath } : {}),
+        ...(currentPath !== undefined ? { currentPath } : {}),
+        ...(activate ? { activate } : {}),
+      });
+      // healDaemonAutostart declines when it has no better PATH to offer —
+      // that refusal is the crash-loop guard, so surface it rather than
+      // claiming a repair that did not happen.
+      if (healed) {
+        actions.push({ action: 'healed-daemon-path', unit: healed });
+        log(`doctor: rewrote ${healed} with a working PATH`);
+      } else {
+        actions.push({ action: 'error', detail: 'could not determine a PATH that finds the multiplexer — run `unsnooze install --daemon` from your shell' });
+      }
+    } else if (fix.action === 'narrow-state-modes') {
+      const r = narrowStateModes(fix.entries || []);
+      actions.push({ action: 'narrowed-modes', ...r });
+      log(`doctor: narrowed ${r.fixed} state-dir path(s) to owner-only `
+        + `(${r.refused} refused, ${r.ineffective} ignored by the filesystem)`);
+    } else if (fix.action === 'archive-dir') {
+      let target = `${fix.dir}.bak`;
+      if (existsSync(target)) target = `${fix.dir}.bak.${now}`;
+      try {
+        renameSync(fix.dir, target);
+        actions.push({ action: 'archived', from: fix.dir, to: target });
+        log(`doctor: archived ${fix.dir} → ${target}`);
+      } catch (err) {
+        actions.push({ action: 'error', detail: `archive ${fix.dir}: ${err.message}` });
+      }
+    }
+  }
+  return actions;
+}
+
+// --- CLI --------------------------------------------------------------------------
+
+export async function cmdDoctor(rest = [], deps = {}) {
+  const { print = console.log, ...checkDeps } = deps;
+  const wantFix = rest.includes('--fix');
+  const report = await runDoctor(checkDeps);
+
+  const legacy = report.findings.filter(f => f.kind === 'legacy');
+  const health = report.findings.filter(f => f.kind === 'health');
+  const info = report.findings.filter(f => f.kind === 'info');
+
+  if (shouldUseTui() && print === console.log) {
+    print(formatDoctorTui(report, { color: true }));
+    if (report.healthy) return 0;
+  } else {
+    if (legacy.length) {
+      print('unsnooze doctor — leftovers from the old claude-session-guard (csg) install:');
+      for (const f of legacy) {
+        print(`  ✗ ${f.title}`);
+        if (f.detail) print(f.detail);
+      }
+    }
+    if (health.length) {
+      print('unsnooze doctor — install health:');
+      for (const f of health) {
+        print(`  ✗ ${f.title}`);
+        if (f.detail) print(f.detail);
+      }
+    }
+    for (const f of info) print(`  · ${f.title}`);
+
+    if (report.healthy) {
+      print('unsnooze doctor: all clear — install is healthy.');
+      return 0;
+    }
+  }
+
+  if (wantFix) {
+    const actions = await applyFixes(report, deps);
+    for (const a of actions) {
+      if (a.action === 'killed') print(`  ✓ stopped csg process ${a.pid}`);
+      else if (a.action === 'removed-unit') print(`  ✓ removed ${a.unit}`);
+      else if (a.action === 'archived') print(`  ✓ archived ${a.from} → ${a.to}`);
+      else if (a.action === 'narrowed-modes') {
+        if (a.fixed) print(`  ✓ made ${a.fixed} state-dir path(s) owner-only`);
+        // Distinguish "cannot" from "did not": a filesystem with no POSIX
+        // modes reports success and changes nothing, and telling the user to
+        // try again would be advice that can never work.
+        if (a.ineffective) {
+          print(`  · ${a.ineffective} path(s) unchanged — this filesystem does not enforce POSIX permissions`);
+        }
+        if (a.refused) print(`  ✗ ${a.refused} path(s) could not be changed (permission denied)`);
+      }
+      else if (a.action === 'error') print(`  ! ${a.detail}`);
+    }
+    const pkg = legacy.find(f => f.id === 'csg-package');
+    if (pkg) print('  → finish up manually: npm rm -g claude-session-guard');
+    return 0;
+  }
+
+  // Offer --fix whenever anything reported is actually machine-fixable, not
+  // only for csg leftovers: a health finding that carries a `fix` (state
+  // permissions) was otherwise a dead end for the reader.
+  const fixable = report.findings.some(f => f.fix);
+  print(legacy.length
+    ? '\nRun `unsnooze doctor --fix` to stop csg processes, remove its autostart, and archive its state.'
+    : fixable
+      ? '\nRun `unsnooze doctor --fix` to apply the repairs above.'
+      : '\nSee the hints above to finish the install.');
+  return 1;
+}

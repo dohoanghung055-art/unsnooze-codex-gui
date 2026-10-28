@@ -1,0 +1,198 @@
+// StopFailure hook handler (`unsnooze _hook-stopfailure [--agent <id>]`).
+// The agent CLI (Claude Code, or Grok Build via its Claude-compatible hooks)
+// invokes this with JSON on stdin when a turn ends in failure matching the
+// configured matcher (overloaded|server_error|rate_limit).
+// Must exit 0 quickly and never block or crash the calling CLI.
+
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  EVENTS_DIR, PROBE_INTERVAL_MS, RESET_MARGIN_MS, CAPTURE_LINES, PANE_SCAN_LINES,
+} from './config.js';
+import { detectLimit } from './patterns.js';
+import { getAgent } from './agents/index.js';
+import { getConfig } from './settings.js';
+import { parseResetTime, resetAtMs } from './time-parser.js';
+import { upsertSession } from './state.js';
+import { latestRateLimitFromTranscript } from './watchers/claude.js';
+import { getMultiplexer } from './multiplexer.js';
+import { tmuxPaneFromEnv } from './multiplexers/tmux.js';
+import { spawnResumerIfNeeded, ensureDaemon } from './spawn.js';
+import { makeLogger } from './logger.js';
+import { addressHash } from './lease.js';
+import { prepareCalibrationSample, applyCalibrationToState } from './usage.js';
+import { claudeRecordEnv } from './sessions.js';
+
+const log = makeLogger('hook');
+
+function readStdin(timeoutMs = 2000) {
+  return new Promise(resolve => {
+    let data = '';
+    const timer = setTimeout(() => resolve(data), timeoutMs);
+    process.stdin.on('data', c => { data += c; });
+    process.stdin.on('end', () => { clearTimeout(timer); resolve(data); });
+    process.stdin.on('error', () => { clearTimeout(timer); resolve(data); });
+  });
+}
+
+function classify(payload, raw) {
+  const hay = JSON.stringify(payload) + raw;
+  if (/rate.?limit|usage.?limit/i.test(hay)) return 'rate_limit';
+  if (/overloaded|server_error|529|503/i.test(hay)) return 'overload';
+  return 'unknown';
+}
+
+export function hookContext(env = process.env, payload = {}) {
+  const managedMux = env.UNSNOOZE_MUX;
+  const muxName = managedMux || (env.HERDR_PANE_ID ? 'herdr' : env.ZELLIJ_PANE_ID ? 'zellij' : 'tmux');
+  const pane = managedMux
+    ? (env.UNSNOOZE_PANE || null)
+    : (muxName === 'herdr' ? env.HERDR_PANE_ID
+      : muxName === 'zellij' ? env.ZELLIJ_PANE_ID : tmuxPaneFromEnv(env) || payload.tmux_pane) || null;
+  const paneOwner = muxName === 'herdr'
+    ? (managedMux ? env.UNSNOOZE_PANE_OWNER : (env.HERDR_SESSION || 'default'))
+    : muxName === 'zellij'
+      ? (managedMux ? env.UNSNOOZE_PANE_OWNER : env.ZELLIJ_SESSION_NAME) || null
+      : null;
+  return { muxName, pane, paneOwner };
+}
+
+export async function runHook(rest = [], { ensureDaemonFn = ensureDaemon } = {}) {
+  try {
+    const agentIdx = rest.indexOf('--agent');
+    const agent = getAgent(agentIdx !== -1 ? rest[agentIdx + 1] : 'claude');
+    if (!getConfig(`agents.${agent.id}`)) return 0;   // agent disabled in settings
+    // A window prime (prime.js) is a throwaway one-shot — never a session to revive.
+    if (process.env.UNSNOOZE_PRIME) return 0;
+    // Nothing keeps the daemon running on native Windows (see ensureDaemon),
+    // and the hook is the one entry point GUI Claude sessions pass through —
+    // so it makes sure the daemon is up. A no-op everywhere else.
+    ensureDaemonFn();
+    const raw = await readStdin();
+    let payload = {};
+    try { payload = JSON.parse(raw); } catch { /* tolerate non-JSON */ }
+    // Claude includes agent_id when a hook fires inside a subagent. The parent
+    // transcript owns revival; recording the child would create a second stop
+    // with no independently resumable pane.
+    if (agent.id === 'claude' && payload.agent_id) {
+      log(`StopFailure: ignoring subagent ${payload.agent_id}; parent session owns resume`);
+      return 0;
+    }
+
+    const { muxName, pane: rawPane, paneOwner } = hookContext(process.env, payload);
+    const leaseId = process.env.UNSNOOZE_LEASE_ID || null;
+    const mux = getMultiplexer(muxName, { owner: paneOwner });
+    // Same guard as the launcher: a pane we cannot prove we are addressing on
+    // the right server is worse than no pane, because every later action —
+    // capture, inject, close — would be aimed at whatever occupies that id
+    // elsewhere. Record the stop without a pane instead.
+    const pane = (typeof mux.paneAddressable !== 'function' || mux.paneAddressable())
+      ? rawPane : null;
+    if (rawPane && !pane) log(`StopFailure: ignoring pane ${rawPane} — not safely addressable`);
+    const kind = classify(payload, raw);
+    log(`StopFailure: kind=${kind} pane=${pane} session=${payload.session_id || '?'}`);
+
+    if (kind === 'overload') {
+      // Seconds-scale problem — leave a marker for the pane's monitor, do NOT
+      // record in state.json.
+      if (pane) {
+        mkdirSync(EVENTS_DIR, { recursive: true, mode: 0o700 });
+        writeFileSync(join(EVENTS_DIR, `${addressHash({ mux: muxName, paneOwner, pane })}.json`),
+          JSON.stringify({ mux: muxName, paneOwner, pane, kind, at: Date.now(), payload: { error: payload.error ?? null } }),
+          { mode: 0o600 });
+      }
+      return 0;
+    }
+
+    // rate_limit (or unknown — treat conservatively as a limit if we can see a banner)
+    const cwd = payload.cwd || process.cwd();
+    const detectedAt = Date.now();
+    const sessionId = payload.session_id || agent.latestSessionId?.(cwd, detectedAt) || null;
+
+    // Prefer the dated transcript entry over an undated pane scrape when the
+    // agent keeps transcripts (claude). Yields both banner text and bannerAt.
+    let resetLine = null;
+    let limitType = 'unknown';
+    let bannerAt = null;
+    let detectedVia = 'hook';
+    const fromTx = latestRateLimitFromTranscript(cwd, sessionId, { now: detectedAt });
+    if (fromTx) {
+      resetLine = fromTx.resetLine;
+      limitType = fromTx.limitType || 'unknown';
+      bannerAt = fromTx.timestampMs;
+      detectedVia = 'transcript';
+      log(`StopFailure: rate-limit banner from transcript (ts=${bannerAt ? new Date(bannerAt).toISOString() : '?'})`);
+    } else if (pane) {
+      try {
+        const text = await mux.capturePane(pane, CAPTURE_LINES);
+        const d = detectLimit(text, PANE_SCAN_LINES, agent.patterns);
+        if (d.hit) { resetLine = d.resetLine; limitType = d.limitType; }
+      } catch { /* pane not capturable (no tmux) — fall back below */ }
+    }
+
+    if (kind === 'unknown' && !resetLine) return 0;   // nothing actionable
+
+    const { at, source } = resetAtMs(parseResetTime(resetLine), {
+      marginMs: RESET_MARGIN_MS,
+      fallbackMs: PROBE_INTERVAL_MS,
+      now: new Date(detectedAt),
+      bannerAt,
+    });
+
+    // Discover the live session name from the pane — never freeze the module
+    // load-time MUX_SESSION_NAME constant onto the record.
+    let muxSession = null;
+    if (pane && typeof mux.sessionForPane === 'function') {
+      try { muxSession = await mux.sessionForPane(pane); } catch { muxSession = null; }
+    }
+
+    // Raw reset (no margin) for calibration window math; `at` keeps the resume margin.
+    const rawResetMs = Number.isFinite(at) ? at - RESET_MARGIN_MS : null;
+    let calSample = null;
+    try {
+      calSample = prepareCalibrationSample({
+        agent: agent.id,
+        limitType,
+        resetAtMs: rawResetMs,
+        now: detectedAt,
+      });
+    } catch (err) {
+      log(`calibration prepare failed: ${err.message}`);
+    }
+    // Stop record + calibration sample in ONE locked update (plan §6).
+    const recordEnv = agent.id === 'claude' ? claudeRecordEnv() : null;
+    upsertSession({
+      sessionId: sessionId || null,
+      cwd,
+      pane,
+      mux: muxName,
+      paneOwner,
+      leaseId,
+      agent: agent.id,
+      origin: 'cli',   // the hook only fires for CLI launches we can see
+      muxSession,
+      status: 'stopped',
+      limitType,
+      detectedVia,
+      detectedAt,
+      bannerAt,
+      resetAt: at,
+      resetSource: source,
+      attempts: 0,
+      lastAttemptAt: null,
+      lastError: null,
+      ...(recordEnv ? { env: recordEnv } : {}),
+      ...(source === 'fallback' ? { probeCount: 0 } : {}),
+    }, {
+      after: calSample
+        ? (state) => applyCalibrationToState(state, calSample)
+        : null,
+    });
+    log(`recorded limit stop: session=${sessionId} resetAt=${new Date(at).toISOString()} (${source})`);
+    spawnResumerIfNeeded();
+    return 0;
+  } catch (err) {
+    log(`hook error (swallowed): ${err.stack || err}`);
+    return 0;   // never fail the hook
+  }
+}

@@ -1,0 +1,11 @@
+This is an automatic resume message from Unsnooze, not a new request written by the user. The previous turn was interrupted by a usage limit. I am away from the computer and cannot respond.
+
+Resume the latest authorized task from its current checkpoint. Re-read the relevant task history, plan, files, and unfinished work before choosing the next action. Do not ask questions, request confirmation, or wait for a reply. Resolve routine choices from the available evidence and use reasonable, reversible assumptions when appropriate.
+
+If a step needs my presence, credentials, an interactive login, a decision only I can make, or new approval, defer that step and its dependent work. Record the exact blocker, then immediately continue with other useful, independent work that is already authorized. One blocked branch is not a reason to stop the whole task.
+
+Continue through implementation, investigation, necessary validation, and follow-up fixes within the existing scope. Do not stop after an initial finding, a plan, a minor milestone, or a status update while useful authorized work remains. Before ending the turn, explicitly check the remaining plan and unresolved findings for steps you can still complete without me; if any exist, do them.
+
+Preserve the original scope, constraints, session settings, and permissions. Do not bypass required approval or authentication, invent missing data, repeat unchanged failed attempts, create busywork, or treat this automated message as consent for new external or irreversible actions.
+
+Stop only when the requested objective is verified complete, no useful authorized work can proceed without me or an external change, or a hard execution limit prevents further progress. If blocked, save a concise checkpoint stating what is done, what remains, the exact blockers, and the concrete next action when I return. Do not end with a question or an offer to continue.

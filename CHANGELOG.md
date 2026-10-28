@@ -1,0 +1,1354 @@
+# Changelog
+
+## 1.20.1 — 2026-10-08
+
+`unsnooze help` lists the usage flags in the right place again, and the docs'
+new copy buttons only ever copy commands that run.
+
+### `unsnooze help`
+
+- The 1.20.0 `prime` entry landed between `unsnooze usage` and its own
+  `--install-statusline` / `--uninstall-statusline` lines, so those flags read
+  as if they belonged to `prime`. They are back under `usage`.
+
+### Website
+
+- Every command block in the docs has a copy button. It copies only commands
+  that run as written: syntax placeholders such as `<id>` and sample values
+  such as a made-up session id or host are shown but never copied, so a
+  pasted `hosts add` can no longer register a fake host. A new test checks
+  every copied command against the CLI.
+- A WebGL star field, a split-flap countdown to the reset and a new 404 page.
+
+## 1.20.0 — 2026-10-08
+
+Window priming starts your 5-hour window before you sit down, and `doctor`
+stops flagging a Claude hook you don't need.
+
+### Window priming (experimental)
+
+- Claude's 5-hour window starts with your first message, so starting work at
+  9am means a reset at 2pm. `unsnooze config set primeAt.claude 06:00` has the
+  daemon send one tiny Haiku prompt at 6am, so the window resets at 11am and a
+  fresh one lands mid-morning. Codex works the same on plans with a 5-hour
+  window (`primeAt.codex`).
+- `primeAt.claude auto` works out the time for you: it learns when you usually
+  start from the last 3 weeks of your own prompts (ignoring tool results,
+  subagents, revivals and late nights running past midnight) and primes 3 hours
+  before. It waits for 5 days of history and re-learns daily.
+- Every prime checks the reset time in the reply and reports whether it
+  started the window, found one already running, or found no 5-hour window on
+  the plan. `unsnooze prime` shows the schedule and last result;
+  `unsnooze prime now` runs one immediately. `primeDays weekdays` skips
+  weekends.
+- A prime that fails (say, the network is not back yet after waking) retries
+  up to three times, five minutes apart, and notifies once.
+- A prime that hits a limit is never treated as a session to revive.
+
+### `unsnooze doctor`
+
+- No longer reports a missing Claude StopFailure hook when Claude is disabled.
+  `unsnooze install --yes` skips that hook for a disabled Claude, so the
+  finding could never be cleared (#44).
+
+## 1.19.5 — 2026-10-05
+
+Sessions resume again under psmux, Antigravity no longer wakes early, and
+`unsnooze update` updates the copy you are running.
+
+### psmux (tmux on native Windows)
+
+- Every Claude revival in psmux failed five times with `ready timeout`. psmux
+  ran the launch command through a shell, so the space in
+  `C:\Program Files\nodejs\node.exe` closed the window before Claude started.
+  Each revival now opens its own psmux session with its arguments passed
+  through as-is, which also keeps a Codex resume message in one piece (#43).
+- A resume message can no longer be typed into an unrelated window. psmux
+  sends keys for a pane that has closed to some other pane, and every psmux
+  session numbers its first pane `%1`. unsnooze now addresses panes as
+  `session:%N` and checks the pane still exists before reading or typing (#43).
+
+### Antigravity (`agy`)
+
+- A session could be woken hours before its quota came back. The `Resets in
+  3h` countdown was dated from the last prompt sent in that folder, which can
+  be much older than the banner. It is now dated from when unsnooze reads the
+  banner, so a wake can be slightly late but not early (#40).
+
+### `unsnooze update`
+
+- With two npm installs on one machine (for example unsnooze under `~/.local`
+  and nvm's npm first on PATH), the update went into the other npm's folder
+  and the running copy never changed. The update now targets the folder the
+  running copy was installed into (#41).
+- It no longer prints "already up to date" when a newer version is known and
+  this copy did not change. It says what happened and exits with an error (#41).
+
+## 1.19.4 — 2026-09-30
+
+Antigravity's new quota banner, and a shorter README.
+
+### Antigravity (`agy`)
+
+- The current `Individual quota reached … Resets in 2h52m46s` banner is now
+  detected, including short countdowns (`45m10s`, `30s`) and multi-day ones
+  (`6d18h`, the weekly cap). A banner a narrow pane wrapped onto two rows is
+  read whole (#38).
+- The countdown is dated from the prompt that hit the limit, not from when
+  unsnooze noticed the banner, so a late scrape no longer pushes the wake late.
+- When a folder has more than one recent Antigravity conversation, unsnooze no
+  longer guesses which one stopped. It wakes the live pane, and uses
+  `--continue` if that pane is gone.
+
+### Docs
+
+- The README is now a short overview. Per-agent details, herdr and Windows
+  notes, and the FAQ moved to the website, including a new
+  [Supported agents](https://unsnooze.dev/docs/agents/) page (#39).
+
+## 1.19.3 — 2026-09-30
+
+Codex fixes from a single herdr report: stops that were missed, woken late,
+or woken in the wrong place.
+
+- The out-of-credits screen on Plus plans no longer hides a usage limit. Its
+  Upgrade / Add Credits picker pushed the banner off the part of the pane
+  unsnooze reads; the "Your rate limit resets on" line is now recognised
+  instead (#36).
+- A reset time that a narrow pane wraps onto the next row is read correctly,
+  instead of falling back to guessing and probing (#33).
+- A Codex stop is only marked resumed once its session log shows new output.
+  A keypress or tab switch that briefly hides the banner no longer drops the
+  stop and its exact reset time. Stops with no session log keep the old
+  behaviour (#34).
+- A session running in herdr (or any non-default multiplexer) keeps its pane
+  address when a second detection of the same stop comes in, so it is woken
+  in its own pane instead of reopened beside it (#35).
+
+## 1.19.2 — 2026-09-27
+
+Setup on Windows no longer creates a Scheduled Task. That task is what
+Microsoft Defender flagged as a Trojan.
+
+### Website redesign
+
+- The new night-shift design now covers the homepage, documentation, changelog,
+  and feedback page, with responsive layouts and reduced-motion support.
+- Release metadata refreshes every five minutes so the site follows published
+  npm versions. Failed feedback-board reads now show an error instead of
+  loading indefinitely.
+- Windows setup and troubleshooting docs describe the on-demand daemon.
+
+### Codex wake recovery
+
+- Team/business stops with a null credits balance now retain the exhausted
+  five-hour window's reset instead of being held as a workspace credit wall.
+- If Codex consumes Enter as a pasted newline, verification retries Enter
+  up to three times while the exact wake prompt remains in the composer.
+  Each retry rechecks pane ownership and agent liveness. The old banner is
+  not re-recorded as a new stop, and the wake text is never pasted twice.
+  An unconfirmed submission is left visible for manual inspection.
+
+### No Scheduled Task on Windows
+
+A user reported that Microsoft Defender flagged `unsnooze setup` as
+`Trojan:Win32/Commando.A!ml` as it created the `\unsnooze` Scheduled Task. It
+was a false positive, but an understandable one. Setup ran
+`schtasks /create /f /sc onlogon /tr "node.exe …\AppData\Roaming\npm\…\unsnooze.js daemon"`:
+an interpreter told to run a script out of `%APPDATA%` at every logon, which is
+exactly how malware persists, and `Commando.A!ml` is Defender's
+machine-learning verdict on command lines like that one. A Run key or a
+Startup-folder entry reads the same way, so the daemon uses none of them now.
+The task rarely worked anyway: from a shell that is not elevated, `schtasks`
+refuses an `onlogon` task with "Access is denied", and setup said it was
+installed regardless.
+
+On Windows the daemon is now an ordinary background process:
+
+- **Setup starts it.** Saying yes to guarding GUI sessions (or running
+  `unsnooze install --daemon`) starts the daemon at once and records that
+  choice in `~/.unsnooze/daemon-on-demand`. Nothing is registered with Windows.
+- **It is started again on demand.** Every agent launched through the
+  PowerShell wrappers, and every Claude Code StopFailure hook, starts the
+  daemon if it is not running. After a restart it is back as soon as you use
+  an agent.
+- **One runs at a time.** The daemon keeps a heartbeat pidfile
+  (`~/.unsnooze/daemon.pid`), and a second daemon stands down at once. Once the
+  heartbeat is five minutes old the file no longer counts, whoever its pid
+  belongs to by then, so a pid Windows recycles after a sign-out cannot keep
+  the daemon from starting. A resumer lock left behind by a daemon that was
+  killed is cleared too, so it cannot stall every resume.
+- **It carries no session with it.** Started from inside a Claude Code
+  session (by the hook), it used to inherit that session's environment,
+  including `CLAUDECODE=1`, Claude Code's nested-session guard. Every Claude
+  session it revived would then have refused to start. Background processes
+  now drop the variables that mark one session; your own settings, such as
+  `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_USE_BEDROCK`, are kept. They also run in
+  your home directory, not the project that happened to start them, which
+  Windows would otherwise refuse to delete or rename until sign-out. The
+  transient resumer the hook starts gets the same treatment, on every
+  platform.
+- **No console windows.** A background daemon has no console. The `git` calls
+  it makes when a session stops and wakes, and the agent a revival starts,
+  now run hidden instead of each popping up a window of its own.
+- **Its output goes to `~/.unsnooze/daemon.log`**, as the launchd daemon's
+  does, so a crash leaves a trace.
+- **Re-running setup restarts it.** `unsnooze install --daemon` stops the
+  running daemon and starts a fresh one. That is how it picks up a new
+  version, or a `PATH` that now finds an agent, and `unsnooze doctor` now
+  says so instead of pointing at `schtasks`.
+
+If you use only the Codex app or IDE on Windows, nothing you do passes through
+a wrapper or the hook. After signing in, run `unsnooze install --daemon` (or
+launch any wrapped agent) to start the daemon.
+
+`unsnooze uninstall` removes the marker first, then stops the daemon, so
+nothing can start it again halfway through; a daemon that was only starting at
+that moment sees the marker gone and exits. It also deletes a `\unsnooze`
+Scheduled Task left by an earlier version, after checking that one exists, so
+a machine that never had one only ever sees a read-only query. If the delete
+is refused (a task created from an administrator shell can need one to
+remove), it prints the command to run. Setup does not go looking for that
+task: that would mean running `schtasks` again. A daemon such a task already
+started keeps running until you sign out; from the next sign-in the task only
+starts the same on-demand daemon, which the pidfile keeps to one. macOS and
+Linux are unchanged (launchd / systemd).
+
+## 1.19.1 — 2026-09-21
+
+A Codex usage reading that was averaged down, a headless Codex revival
+that could never have worked — reported as a success — and Codex stops that
+were never seen at all behind a proxy or in a reverted thread.
+
+### `unsnooze usage` reports Codex's exact percentage as read
+
+The 64% in [issue #20](https://github.com/saaranshM/unsnooze/issues/20) was
+`(29 + 99) / 2`: a jump of more than 15 points was averaged with the reading
+before it and still labelled `exact`. The averaging was meant to soften a
+one-tick spike, but at the moment a session is blocked no further reading
+arrives, so the low number stayed for the rest of the window — and 64 is
+below the 80/95 warning thresholds, so the usage-wall notification never
+fired. Codex's `used_percent` is the server's own number and is now shown
+unchanged (still clamped to 0–100).
+
+Two things could put a much lower reading in front of the latest one: Codex
+writes one snapshot per rate-limit bucket per response, and `unsnooze usage`
+read every bucket (`premium`, `codex_other`, …) as the account window; and
+Codex Desktop tabs and sub-agents each write their own rollout, so "the
+previous reading" could be another thread's minutes-old snapshot. Only the
+account bucket feeds the 5h/weekly lines now, and burn is measured between
+readings of the same rollout. Thanks to
+[@mio-tsuki](https://github.com/mio-tsuki) for working out the arithmetic.
+
+### Headless Codex revivals run, and a revival that dies says so
+
+[Issue #25](https://github.com/saaranshM/unsnooze/issues/25): on Windows the
+daemon's Scheduled Task could not find `codex`, every revival died with
+`spawn codex ENOENT`, and unsnooze logged `verified resumed` anyway.
+
+- **`codex exec resume`.** Under the headless backend a revival ran the Codex
+  TUI, which exits before touching the session when stdin is not a terminal —
+  on every OS, since the backend shipped in 1.16.0. Headless Codex revivals
+  now run `codex exec resume <id> "<prompt>"`, which continues the same
+  conversation non-interactively, the way Claude's headless revival already
+  passed its prompt in argv. It is given `--skip-git-repo-check`: `exec`
+  refuses any directory that is not a git repository, which the TUI never
+  did, and the session being revived already ran there. `resumeExtraArgs.codex`
+  goes right after `exec`, where `-s`, `-p` and `--add-dir` parse; after
+  `resume` they were rejected outright.
+- **A dead revival is a failed attempt.** With no pane to capture, an empty
+  capture used to count as a cleared banner. The headless backend now records
+  each revival's exit, and a non-zero one puts the stop back on the ledger
+  with backoff and a `last error` that carries the child's own words — visible
+  in `unsnooze status`, and kept when unsnooze finally gives up on the session.
+  A revival still running at the 20-second check is watched for up to two
+  minutes before it counts as resumed, long enough to catch the failures that
+  take a while (an auth refresh giving up, a retry loop); exit 0 counts as
+  resumed. A revival started by a resumer the Claude hook spawned no longer
+  inherits Claude's nested-launch marker, which had made it drop
+  `launchExtraArgs` and fail with a bare "exit 1".
+- **A revival into a deleted directory no longer takes the daemon down.** When
+  a session's directory was gone (a removed worktree, say), the headless
+  launch failed with an error nothing was listening for, and the daemon
+  crashed. It is now an ordinary failed attempt that names the reason.
+- **`unsnooze preview` shows the headless command.** It described a typed
+  resume and the Codex TUI for sessions that dispatch revives through argv
+  and `codex exec resume`.
+- **Windows finds the Codex runtime.** The Desktop/Store install keeps
+  `codex.exe` under a versioned directory that changes on update, and a daemon
+  started at logon keeps the PATH it was born with. Codex is now resolved at
+  launch: `UNSNOOZE_CODEX_BIN`, then `codex.exe` on PATH, then the newest
+  runtime under `%LOCALAPPDATA%\OpenAI\Codex\bin`. A `.cmd`/`.bat` shim
+  cannot be launched directly by Node; the launcher now says so and names the
+  variable to point at the `.exe` instead of failing with `EINVAL`.
+- **`unsnooze doctor` names each agent's binary** as the launcher would resolve
+  it, and reports an agent that cannot be launched as a health problem — on
+  Windows with the note that the daemon's environment can lag the shell's and
+  how to refresh it. Only for agents that have run on the machine: Claude and
+  Codex are both on by default, and a Claude-only machine is not unhealthy for
+  having no `codex`. The lookup follows spawn's own Windows rules: an `.exe`
+  anywhere on PATH wins over an npm shim earlier on it, quoted PATH entries
+  count, and a path given without its extension finds the `.exe`.
+- **Codex stops bind to the right reset.** A `rate_limit_reached` at a reported
+  99.x% was scheduled for the *weekly* reset (the latest one), days out; it now
+  binds the window nearest exhaustion. A workspace wall — credits depleted or
+  a spend cap, with no window spent — has no reset to wait for: it is announced
+  as needing you rather than "resumes when the limit resets", probed, and then
+  held with the remedy (add credits or raise the cap, then continue the
+  session in Codex) instead of a blind wake. A spent window (99% or more)
+  still governs when a workspace reason rides along, since its reset is what
+  brings the plan allowance back. `unsnooze status --json` shows the reason as
+  `limitReason`.
+- **A weaker reading no longer undoes an exact reset.** A re-detected stop
+  whose only evidence is a banner ("Try again later.") used to replace the
+  exact reset the rollout snapshot had given, turning a known wake into a
+  15-minute probe; the stronger schedule now stands until it passes, the rule
+  pane detection already followed. `unsnooze usage` in the dashboard also
+  stops reading Codex burn as idle whenever the daemon is running.
+
+The Windows resolution follows the layout in the report and wants a Windows
+run before it is trusted; continuing an open Codex Desktop thread in place
+(`codex queue`) is a separate follow-up. Thanks to
+[@nwn900](https://github.com/nwn900) for the precise report.
+
+### Codex stops behind a proxy, and in reverted threads
+
+[Issue #27](https://github.com/saaranshM/unsnooze/issues/27) found two ways
+a Codex desktop-app or IDE session went untracked:
+
+- **Reverted threads are watched.** An edited, regenerated or `/undo`-ed
+  thread continues in `rollout-<ts>-<thread id>_<rollout id>.jsonl`, a name
+  the rollout watcher never opened. Those files are now watched, counted by
+  `unsnooze usage`, and resumed by the stable thread id.
+- **A stop recorded only as an error is a stop.** Behind an OpenAI-compatible
+  proxy the rate-limit headers never reach Codex, every snapshot has empty
+  windows, and no stop was ever detected. Since codex-cli 0.145 the failed
+  turn's `task_complete` carries the limit error itself; unsnooze now reads
+  it and dates it from the banner the way a scraped pane is dated ("Try again
+  later." is probed). When the same turn also wrote an exhausted snapshot,
+  its exact reset still wins, and a workspace wall — in the snapshot or in
+  the banner's own words — stays a wall. Only the banner counts: Codex marks
+  billing and plan errors ("Quota exceeded…", "upgrade to Plus…") with the
+  same `usage_limit_exceeded` code, and those are not stops, nor is a bare 429,
+  which carries no reset time.
+- **Codex's current banner is recognized.** Codex now writes "You’ve hit your
+  usage limit" with a typographic apostrophe; the anchor accepts both, in
+  rollouts and in panes.
+- **A reset in the banner's own minute is not tomorrow.** Codex prints the
+  reset time without seconds, so a limit hit at 7:36:15 that resets at
+  7:36:40 says "try again at 7:36 AM" — which was read as 7:36 the next
+  morning, a day late. It now wakes at 7:37.
+
+Thanks to [@d-jiao](https://github.com/d-jiao) for the report, the fix in
+[PR #28](https://github.com/saaranshM/unsnooze/pull/28), and checking it
+against 523 real rollouts.
+
+## 1.19.0 — 2026-09-10
+
+Fish shell support, direct help/version commands, and a fix for Codex sessions
+that stop at a reported 99% usage.
+
+### Fish shell support
+
+`unsnooze setup` and `unsnooze install` now install fish wrappers when fish is
+your login shell or its config file already exists. The default location is
+`~/.config/fish/config.fish`; an absolute `XDG_CONFIG_HOME` is respected.
+`unsnooze doctor` checks this file, and `unsnooze uninstall` removes the wrappers.
+Re-running setup replaces the existing block and preserves your other settings.
+Use `--fishrc <path>` with install or uninstall to choose another config file.
+
+After upgrading, run `unsnooze setup` once to add the fish wrappers, then open
+a new shell. Thanks to [@duncanmcqueen](https://github.com/duncanmcqueen) for
+[PR #21](https://github.com/saaranshM/unsnooze/pull/21).
+
+### Help and version commands run directly
+
+Commands such as `claude --help` and `codex --version` now pass straight to
+the agent. They do not open a multiplexer session, start a pane monitor,
+prepend `launchExtraArgs`, or append an unsnooze update notice. The existing
+print-mode passthrough is unchanged. Thanks to [@chid](https://github.com/chid)
+for [PR #23](https://github.com/saaranshM/unsnooze/pull/23).
+
+### Codex can be detected as stopped at a reported 99%
+
+The GUI watcher now recognizes the sequence reported in
+[issue #20](https://github.com/saaranshM/unsnooze/issues/20): a five-hour Codex
+window reaches 99%, then the next rate-limit snapshot switches to an empty
+`premium` bucket with no credits. It records the stop and schedules the session
+using the previous reset time, plus the normal safety margin.
+
+This fallback requires snapshots from the same rollout no more than a minute
+apart, no available credits, and a future reset time. It works across watcher
+polls and daemon restarts. An already-exhausted weekly window still takes
+precedence if it resets later. A 99% reading alone does not trigger a resume.
+
+The separate report of stale 64% usage was not reproduced; this release fixes
+the missed stop detection. Thanks to [@mio-tsuki](https://github.com/mio-tsuki)
+for the sample. Fixed in [PR #24](https://github.com/saaranshM/unsnooze/pull/24).
+
+### Test fixes
+
+- Permission tests now set their required file mode explicitly, so they pass
+  with different system umasks. Thanks to
+  [@Chang-Jin-Lee](https://github.com/Chang-Jin-Lee) for
+  [PR #22](https://github.com/saaranshM/unsnooze/pull/22).
+- Fish install/uninstall tests use temporary profiles and leave existing user
+  settings, wrappers, and daemon state untouched.
+- Help/version tests use a portable test executable instead of relying on
+  platform-specific `echo` behavior.
+
+## 1.18.0 — 2026-09-02
+
+**Cursor CLI support**, a wrapper change that keeps `cursor .` working, and a
+model-limit notification that finally names a remedy the CLI actually has.
+
+### Cursor CLI (`cursor-agent`)
+
+⚠️ Experimental, off by default — turn it on in `unsnooze setup`, or:
+
+```sh
+unsnooze config set agents.cursor on && unsnooze setup
+```
+
+| | |
+|---|---|
+| **Detection** | pane scrape |
+| **Limit type** | `model` — probed, never a scheduled wake |
+| **Revive** | `cursor-agent --resume=<id>`, else `--continue` |
+| **Chat ids** | `~/.cursor/chats/<md5 of cwd>/<id>/meta.json`, verified against the cwd |
+| **Wraps** | `cursor-agent` only |
+
+**Cursor's limit is the first one not worth waiting for.** Its usage resets on
+your monthly *billing cycle*, not a rolling window. From a real limit:
+
+```
+Error: You've hit your usage limit
+Get Cursor Pro for more Agent usage, unlimited Tab, and more.
+fallbackModel:
+spendLimitHit: false
+chatMessage: *…Your usage limits will reset when your monthly cycle ends on 10/2/2026.*
+spendLimits: [50,100,200]
+```
+
+A month out. Sleeping on that would mean a monitor waking in October to type
+into a wall that never moved. So unsnooze treats it as a **model limit**:
+
+- records the stop and tells you it needs a decision
+- probes at 15/30/60 min, resuming the moment the banner clears — you change
+  plan, or the cycle rolls
+- marks the record `failed` at the probe ceiling instead of sending a futile wake
+
+`resetPatterns` is empty on purpose (a test pins it): any reset pattern there
+would silently re-route Cursor onto the 5-hour fallback ladder.
+
+Transport errors take the transient-overload ladder and `Authentication
+required` is notify-only — neither reaches the ledger. Banner text is
+server-provided and plan-dependent, so `unsnooze report cursor` is how it
+improves.
+
+### `cursor .` still opens the IDE
+
+Cursor ships its CLI as both `cursor-agent` and `agent`, while the bare
+`cursor` is the *editor* launcher. Adapters can now declare `wrapperNames`, so
+unsnooze wraps `cursor-agent` and leaves the other two alone — `agent` is far
+too generic to shadow safely. Wrapper output for the existing seven adapters is
+unchanged, byte for byte.
+
+### Model limits now suggest something you can actually do
+
+Both the "needs you" and probe-ceiling notifications hardcoded Claude's
+wording, so a Cursor user was told to run `/usage-credits` — a command Cursor
+does not have. The hint moves onto the adapter, and since a model limit has no
+reset time to wait for, that one sentence is the whole remedy.
+
+## 1.17.0 — 2026-08-23
+
+- **A state directory unsnooze cannot write to no longer pins a CPU core
+  forever.** The lock around `~/.unsnooze/state.json` treated every `mkdir`
+  failure as contention. `EEXIST` really is contention — someone else holds the
+  lock — but `EACCES` on an unwritable state directory, `EROFS` on a read-only
+  filesystem and `ENOSPC` on a full one are not, and that branch retried with
+  neither a sleep nor a deadline check. Since `mkdir -p` on a directory that
+  already exists succeeds as a no-op, there was nothing to break the cycle:
+  the loop spun at around 70% of a core, ignored `UNSNOOZE_LOCK_TIMEOUT_MS`
+  entirely, and never returned. It took every writer with it — the daemon, any
+  CLI command, and the StopFailure hook that runs *inside* your agent. unsnooze
+  now repairs a state directory it owns and otherwise fails on the deadline with
+  the errno that caused it.
+
+- **Everything under `~/.unsnooze` is now owner-only (0700 / 0600).** The
+  directory was 0755 and every file inside it 0644, so on a shared machine any
+  other local user could read them. That directory holds your ntfy bearer token
+  (`config.json`), the text of queued prompts and the paths they run in
+  (`state.json`), your fleet's ssh destinations and the commands that fetch
+  their passwords (`hosts.json`), a mirror of every remote host's sessions
+  (`fleet-cache.json`), a lease file per pane carrying its working directory
+  (`leases/`), and — for a headless revival — the entire stdout and stderr of
+  an unattended agent run (`headless/*.log`). Every writer now creates its file
+  owner-only and its directory 0700.
+
+  Upgrading an existing install needed more than that, because none of it is
+  something a writer can fix: `mkdir`'s mode is ignored for a directory that
+  already exists, appending to a log reuses the file's inode, and
+  `config.json` and `hosts.json` are written only by `config set` and
+  `hosts add`, so an install that never touches them again would have kept
+  their old mode — and the token in one of them — indefinitely. So a state
+  write repairs the modes directly, walking the `events/`, `leases/`,
+  `mux-sessions/` and `headless/` subdirectories as well as the top-level
+  files. It re-checks on an interval rather than once per process, because
+  `daemon.log` is created by launchd/systemd redirecting the daemon's stdout
+  and can appear after a first pass has already run — in a process that then
+  lives for days. It strips group and other access without touching the
+  owner's own bits, so an executable in there stays executable; it never
+  follows a symlink or a hardlink into a file it is about to change; and it
+  only ever touches unsnooze's own state directory. `unsnooze doctor` reports
+  from the same walk the repair acts on, so the two cannot disagree about what
+  counts as exposed. It is inert on Windows, which has no POSIX mode bits —
+  libuv synthesises them by mirroring the owner's, so every file there reads
+  as world-readable and no `chmod` can change it; access is governed by the
+  profile ACL instead. The same is true of a state directory on a filesystem
+  that does not implement permissions at all — a CIFS or vfat mount, WSL's
+  `drvfs`, a bind mount from a Windows host — and the platform name does not
+  identify those, so unsnooze finds out by attempting the change and looking:
+  a `chmod` that succeeds while the bits stay put means the filesystem has
+  nothing to set, and the directory is left alone rather than rewritten every
+  minute forever. `unsnooze doctor --fix` reports those three outcomes
+  separately, so "could not" is never printed as "did".
+
+  The statusline shim's own drop directory, `~/.claude/unsnooze`, gets the
+  same treatment: it holds your live rate-limit numbers and was created 0755.
+  It is repaired on the shim's next run rather than only for new installs.
+
+  `unsnooze doctor` now also reports anything under the state directory that
+  other users can read, and `doctor --fix` narrows it. That check exists
+  because the repair deliberately ignores a failed `chmod` — crashing every
+  state write on a filesystem that has no usable one would be the worse bug —
+  so something has to be able to tell you it did not take.
+
+  No credential was ever stored in plaintext: a password source is a
+  *reference* to your keychain, environment or secret tool, never the secret.
+  On a single-user machine nothing here was reachable by anyone new.
+
+- **A hostile `session_id` can no longer steer where unsnooze reads or
+  writes.** Three places took that value — which arrives in a payload from the
+  agent — and used it directly as a filename. The opt-in Claude Code statusline
+  shim built its drop filename by concatenating it, so a `/` or a `..` walked
+  the write out of `~/.claude/unsnooze` and over any `.json` file you can
+  write. `transcriptPath`, on the StopFailure hook path that everyone has
+  enabled, composed a transcript path the same way, turning a read of your own
+  transcript into a read of any `.jsonl` you name. And the Kimi adapter probed
+  for a session directory by the same concatenation, which leaked whether an
+  arbitrary path exists. Claude Code sends a uuid, so all three needed a
+  malicious or compromised agent to reach, and the two reads are only ever
+  mined for a timestamp or a boolean — never echoed back. None of them was in
+  a position to know that. All three now require a filename-shaped id and fall
+  back to `unknown` / no-transcript / not-found. If you have the statusline
+  shim installed, re-run `unsnooze usage --install-statusline` to pick up the
+  fix; the other two need nothing.
+
+- **A corrupt `state.json` no longer prints its own first bytes into the log.**
+  The quarantine message included V8's `JSON.parse` error, and V8 embeds a
+  snippet of the input it choked on — so a state file that had been replaced
+  with something else echoed that file's opening characters into
+  `unsnooze.log`. The quarantined file is still kept on disk, and the log still
+  names it and says why.
+
+- **Three narrower lock fixes.** A writer whose stale-lock steal was itself
+  stolen no longer deletes the thief's lock on the way out — it only removes a
+  lock still stamped with its own pid. The steal itself now re-checks that the
+  directory it is about to remove is still the one it judged stale, narrowing
+  a window where two contenders could both decide to steal and the slower one
+  would delete the winner's fresh lock. And a lock is now stolen on age alone
+  once it is very old: liveness was decided by signalling the recorded pid,
+  which cannot tell "unsnooze is still working" from "that number now belongs
+  to some unrelated long-lived process", so a leaked lock whose pid was later
+  recycled wedged every writer permanently, with no recovery but deleting the
+  directory by hand.
+
+  That last one is a trade rather than a free win — stealing from a holder that
+  really is still working puts two writers in the critical section, and one
+  overwrites the other. It is chosen because a permanent wedge is the worse
+  failure, and the exposure is kept small by making sure the lock is only ever
+  held for in-memory work plus a single write: `upsertSession` used to compute
+  its workspace fingerprint inside the lock, which shells out to git, and
+  `execFileSync`'s timeout is a soft bound — it signals the child and then
+  waits for it to actually exit, which a git wedged on a hung network mount
+  never does. That call now happens before the lock is taken, so nothing
+  unbounded runs inside it.
+
+  *Raised in [#17](https://github.com/saaranshM/unsnooze/issues/17). The report
+  also flagged the askpass `command` source as command injection and reading
+  `state.json` as a symlink-following bug; neither is a vulnerability. A
+  `command` source is your own configured command, in the shape git's
+  `credential.helper = !cmd` has always taken, and it can only be set by
+  someone who can already write to your home directory. As for the symlink:
+  reads do follow one — point `state.json` at a file holding valid JSON and
+  its contents are read as state — but planting that link needs write access
+  to a directory that is now 0700, which is not a boundary anyone crosses
+  without already owning the account. The write side is genuinely safe: the
+  quarantine renames the link rather than the file it points at, and a state
+  write replaces the link with a real file, so the target is never truncated
+  or overwritten.*
+
+## 1.16.3 — 2026-08-22
+
+- **A dashboard left open overnight no longer runs the machine out of memory.**
+  ([#16](https://github.com/saaranshM/unsnooze/issues/16)) `unsnooze status` in
+  a spare pane is exactly what it is for, and after nine or ten hours it was
+  dying on *"FATAL ERROR: Ineffective mark-compacts near heap limit — JavaScript
+  heap out of memory"*. The dashboard itself was innocent: React's development
+  build files a `performance.measure()` entry for every render, commit and
+  `setState` — the performance track it publishes for devtools — and Node
+  buffers user-timing entries forever with nothing to drain them. The status tab
+  repaints about three times a second (a one-second data tick plus the
+  450ms logo animation), each repaint left roughly 40 entries behind, and a
+  night of that walks into Node's 2GB heap ceiling. Measured at ~12kB retained
+  per render, surviving a forced garbage collection. The dashboard now drains
+  that buffer while it is mounted; heap use went from climbing without limit to
+  flat. Nothing else in unsnooze records user timing, and no other command
+  renders long enough to have been affected.
+
+- **Every release now creates its GitHub release automatically.** They were
+  written by hand afterwards, so 1.16.2 shipped to npm and to the website while
+  the repository's Releases tab still showed 1.16.1. The publish workflow now
+  creates the release from that version's CHANGELOG section, and waits for the
+  npm registry to actually serve the new version before rebuilding the website —
+  `npm publish` returns before the registry does, which is why 1.16.2's own
+  changelog entry was briefly invisible on unsnooze.dev.
+
+## 1.16.2 — 2026-08-22
+
+- **A herdr revival now opens a tab in your project's workspace, not a new
+  workspace of its own.** ([#15](https://github.com/saaranshM/unsnooze/issues/15))
+  `newWindow` means "one more terminal for this work" — a window in tmux, a tab
+  in Zellij — and it was mapped to `herdr workspace create`. But a herdr
+  workspace is the *project*: it is per repo, the way a tmux session is. So
+  every reset left another top-level workspace for the same repo, and a week of
+  them was a sidebar full of duplicates. unsnooze now asks herdr which
+  workspace is already open on that directory and adds a tab there, creating a
+  workspace only when there is genuinely none — a session it just started, or a
+  directory herdr has nothing open on. A tab rather than a split, because a
+  revived agent draws a full-screen TUI and halving the pane you are looking at
+  would leave two terminals too narrow to use; neither takes focus away from
+  what you are doing.
+
+## 1.16.1 — 2026-08-16
+
+- **`unsnooze status` no longer offers an attach command for headless sessions.**
+  A headless "pane" is a detached pid, but the attach hint fell through to the
+  default `tmux attach -t <session>` — a command that at best does nothing and
+  at worst attaches to an unrelated tmux session that happens to share the name.
+  Headless output lives in `~/.unsnooze/headless/<session>.log`, and status now
+  says nothing rather than something wrong. Found while building the capability
+  table for the new **[Supported terminals](https://unsnooze.dev/docs/#terminals)**
+  docs section, which sets out exactly what each of tmux, Zellij, herdr, cmux
+  and headless does and does not do.
+
+## 1.16.0 — 2026-08-16
+
+- **Claude Design, and native Windows along the way.** ([#13](https://github.com/saaranshM/unsnooze/issues/13))
+  Claude Design shares your 5-hour and weekly limits with everything else, so a
+  long design run stops exactly like any other session — the obstacle was never
+  the stop, it was that Design's canvas is a web app with no pane to watch, and
+  that the reporter was on Windows, where unsnooze watched nothing at all.
+  `unsnooze design setup` wires up the official `claude-design` MCP server so
+  the work runs inside Claude Code, where it is watched like anything else;
+  `unsnooze design` reports whether it is registered and signed in, keeping
+  those two apart because an expired `/design-login` is *not* a usage limit and
+  waiting will never clear it. unsnooze does not automate the web canvas and
+  will not: Anthropic's Consumer Terms bar automated access to claude.ai, and
+  accounts have been terminated over it.
+
+- **Watching without a multiplexer (`headless`).** A pane was only one of three
+  detection channels — the StopFailure hook and the transcript watcher never
+  needed one. What was missing was somewhere to put a revived agent, so there
+  is now a backend where a "pane" is a pid and a revive is a detached process
+  logging to `~/.unsnooze/headless/`. That makes native Windows, bare servers
+  and CI work. It is picked only when no multiplexer is installed, never ahead
+  of one, and it is honestly weaker: no limit-menu answering, no busy
+  detection, no live pane to attach to.
+
+- **Native Windows is supported.** Previously unsnooze printed *"native Windows
+  is not supported; run inside WSL"* and ran your CLI unwatched. Two things
+  were broken beneath that: the StopFailure hook command was POSIX
+  (`test -f …`), which cmd.exe has no `test` for, so the hook failed on every
+  turn; and the shell wrapper only ever reached `~/.zshrc` and `~/.bashrc`,
+  files a PowerShell user does not have — so nothing routed through unsnooze in
+  the first place. Both are fixed, the daemon autostarts from a logon-triggered
+  Scheduled Task, and `unsnooze doctor` stops reporting wrappers as missing
+  when they are installed. WSL remains the richer option.
+
+- **A server throttle is no longer mistaken for your usage limit.** Claude Code
+  says *"API Error: Server is temporarily limiting requests (not your usage
+  limit)"* — and `usage limit` matched the parenthetical. Since the TUI never
+  clears old banners from scrollback, any stale *"resets 3pm"* nearby was enough
+  to turn a throttle that clears in seconds into an hours-long scheduled wait.
+  It is now read as what it is and handled on the transient overload ladder.
+
+- **Non-resetting Claude stops are notified, not scheduled.** The claude adapter
+  gained the `terminalPatterns` every other adapter already had. An expired
+  Claude Design credential and an exhausted credit balance are stops no amount
+  of waiting clears, so unsnooze says so once instead of booking a wake and
+  burning the attempt cap. This matters most for unattended runs: a revived
+  headless session has no interactive terminal, so `/design-login` cannot even
+  be offered there. All patterns are anchored to the CLI's real error phrasings
+  rather than to the bare command name, so an agent explaining `/design-login`
+  is not a stop.
+
+- **Claude's own auto-continue is recognised, not raced.** Claude Code shipped
+  in-process auto-continue on 2026-08-14 (desktop; the CLI carries it behind a
+  gate that currently defaults off). unsnooze was already guarded — every resume
+  path checks whether the session moved on its own, and the 60s reset margin
+  means Claude gets there first — but a session that woke itself was recorded
+  identically to one unsnooze woke, so the deliberate stand-aside was invisible.
+  Records now carry who resumed them and `unsnooze status` says *"resumed itself
+  (unsnooze stood aside)"*. Note the native feature covers only the 5-hour
+  limit: weekly stops, closed apps, headless boxes and every non-Claude CLI
+  remain unsnooze's job.
+
+- **`launchExtraArgs.<agent>`.** The launch-side twin of `resumeExtraArgs`, for
+  flags that must hold for a whole session rather than just a revival —
+  `unsnooze config set launchExtraArgs.claude "--autocompact 400000"` keeps a
+  context-heavy run compacting instead of stalling. Revivals inherit them, so
+  the flag survives the wake.
+
+## 1.15.0 — 2026-08-15
+
+- **Two new multiplexer backends: herdr and cmux.** unsnooze now watches and
+  revives sessions in [herdr](https://herdr.dev) and [cmux](https://cmux.dev)
+  alongside tmux and Zellij, chosen automatically from the multiplexer you are
+  already inside or explicitly with `unsnooze config set multiplexer herdr`.
+  Both are terminals built for running coding agents, and both start a command
+  by *typing* it into a pane rather than exec'ing it, which is a materially
+  different contract from tmux and Zellij — a revival's arguments are now
+  shell-quoted for them, and an argument that cannot be typed at all (a
+  multi-line resume message, say) travels through the pane's environment
+  instead of being mangled or refused. herdr needs 0.8.0 or newer; Homebrew
+  still ships 0.7.3, so install the release binary. Original herdr backend by
+  Wave Consulting (@walt-verweij) with follow-up work by @gaoflow; cmux backend
+  by @echarrod.
+
+- **Per-model limits are no longer invisible.** Claude Code can stop with
+  *"You've reached your Fable 5 limit. Run /usage-credits to continue or switch
+  models with /model"* — a banner with no reset time, which the previous
+  detection (a limit phrase paired with a time) could never match, and which
+  fires no StopFailure hook. The session simply stopped, untracked and
+  unannounced. It is now detected and tracked. Because only a human clears it,
+  unsnooze never types at such a pane: it probes until the banner goes, and at
+  the ceiling records a visible failure naming both remedies rather than
+  pretending a wake is coming. Detection is deliberately conservative — an
+  agent *quoting* the banner in its own output is not a stop. (@gaoflow)
+
+- **Four reset-scheduling bugs found in production.** A banner left on screen
+  after its reset passed was re-parsed every few seconds as "now + margin", so
+  the wake slid forward forever and the resumer never fired. An undated
+  "resets 10:30pm" re-read after midnight resolved to *tomorrow*, 22 hours out.
+  Accumulated pane-snapshot records with no session id each revived their own
+  copy of the same conversation — 23 records produced roughly 8 clones in one
+  repo at a weekly reset; at most one now revives per agent and project. And a
+  stop arriving after an old record was abandoned is no longer held back by it.
+  (@gaoflow)
+
+- **New setting: `resumeExtraArgs.<agent>`.** A revival spawns the agent binary
+  directly, so flags that normally come from a shell alias or wrapper do not
+  apply — a user who always runs `claude --dangerously-skip-permissions` got a
+  permission-prompting revival, which is about as useful as none. Set them per
+  agent and they are appended to launches unsnooze performs itself. Quoting is
+  respected (`--append-system-prompt "stay in this repo"` is two arguments, not
+  five), and `config.json` accepts an array if you would rather not think about
+  quoting at all.
+
+- **A failed launch no longer leaves a monitor scraping forever.** The monitor
+  starts before the agent does, and when the agent failed to start at all there
+  was no lease to notice its absence — so the monitor watched an ordinary shell
+  prompt indefinitely, one more process per failed launch. It now writes the
+  lease unconditionally (it was previously skipped wherever process start times
+  are unavailable, including Windows) and gives up if none appears. Reported by
+  @echarrod.
+
+- **Node 20.12 is now the minimum.** `engines` promised `>=20` while a
+  dependency needed `styleText` from `node:util`, which arrived in 20.12 — so
+  installs on 20.0–20.11 succeeded and then crashed on startup. The floor is
+  honest now, and CI tests that exact version so it cannot drift again.
+
+## 1.14.4 — 2026-08-08
+
+- **Windows: the daemon PATH check split on the wrong separator.** The check
+  added in 1.14.3 split `PATH` on `:`, which is right on macOS and Linux and
+  wrong on Windows — there the separator is `;` and every absolute path
+  contains a colon (`C:\...`), so entries were shredded into fragments. The
+  predicate now uses the host's own delimiter. No behavior changed on macOS or
+  Linux, and Windows has no autostart unit for the check to reach, so this is a
+  correctness and test-portability fix rather than a user-visible one.
+
+## 1.14.3 — 2026-08-08
+
+- **Upgrades now reach running watchers.** A per-pane monitor lives as long as
+  the agent and a transient resumer lives until the reset; neither has a
+  supervisor, and `npm i -g unsnooze` cannot change code a running process has
+  already loaded. A session started before an upgrade therefore kept applying
+  the old rules indefinitely — which is why 1.14.2's resume-lifecycle fix could
+  be installed and still change nothing on a long-lived pane. Both processes now
+  notice that the package changed underneath them, hand off to a replacement on
+  the fresh code, and stand down. Sessions launched under 1.14.2 or earlier need
+  one restart to pick this up; after that, upgrades propagate on their own.
+- **Hand-offs are verified, never assumed.** `spawn` resolves the node binary,
+  which exists regardless of the package, so a tree caught mid-swap returns a
+  healthy-looking pid for a child that is already dead. The hand-off now checks
+  that the entry point exists before starting anything, and that the replacement
+  survived startup before standing down. Either check failing keeps the old
+  process watching — a stale watcher beats no watcher.
+- **A manually run daemon no longer dies on upgrade.** `unsnooze daemon` started
+  from a shell has nothing to restart it, so exiting on version skew ended GUI
+  watching silently. It now detects whether launchd/systemd is actually
+  supervising it: supervised, it exits and returns on fresh code; unsupervised,
+  it warns once and keeps watching. The 15-minute detection interval is
+  unchanged — a tighter loop raises the odds of restarting into a half-installed
+  package.
+- **The daemon PATH self-heal actually heals.** The 1.12 repair regenerated the
+  autostart unit from the PATH of whichever process called it, and the only
+  caller is the daemon itself — whose PATH is the minimal one launchd and
+  systemd provide. It wrote the broken PATH straight back, then, because the
+  check only asked whether a PATH block was *present*, treated the job as done
+  forever. Observed live: a daemon running with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`
+  while tmux sat in `/opt/homebrew/bin`, so every GUI revival failed with ENOENT.
+  The heal now asks the login shell for a usable PATH and rewrites the unit only
+  when the result can actually find the multiplexer *and* differs from what is
+  already there — rewriting reloads the unit, which kills the calling daemon, so
+  a heal that cannot improve anything must do nothing.
+- **`unsnooze doctor` reports a daemon that cannot reach its multiplexer**, and
+  `--fix` repairs it. This was previously invisible, because doctor probes tmux
+  from your shell's PATH rather than the daemon's.
+- **Version stamps in the log.** The monitor and resumer record which build they
+  are running as they start, so a pasted log answers "is this process even on
+  the new code" without further diagnosis.
+- Internal: one shared `pidAlive` now backs the resumer's lock hygiene, the
+  dashboard, and the hand-off. It rejects pid 0, which `kill(0, 0)` reports as
+  alive because that signals the caller's own process group — a lock file
+  holding `0` could otherwise be honored forever. Writing an autostart unit
+  outside the live location no longer activates it: every unit carries the same
+  label, so loading a copy hijacks the real job instead of adding a second one.
+
+## 1.14.2 — 2026-08-06
+
+- **Resume lifecycle:** a limit banner scrolling out of the pane no longer
+  marks a Claude session resumed without a wake. Unsnooze now requires a
+  newer non-error parent-assistant usage record, rechecks that evidence
+  immediately before dispatch, ignores subagent `StopFailure` records, follows
+  the canonical key retained by state dedupe, and never treats a persistently
+  busy pane as proof of completion.
+- **Usage diagnostics:** estimated usage now says that its percentage is
+  unavailable, rather than claiming no stop was observed. Proxy
+  launcher documentation explains that `headroom wrap` bypasses Unsnooze's
+  shell launcher and same-pane monitor while hook detection and enabled daemon
+  file watching remain available.
+
+## 1.14.1 — 2026-08-04
+
+- **Package discovery**: refreshed the npm description and README links, and
+  moved the published package homepage from the legacy Combustor Tech hostname
+  to [unsnooze.dev](https://unsnooze.dev). No runtime behavior changed.
+
+## 1.14.0 — 2026-07-19
+
+- **Queued prompts**: `unsnooze prompt add [--agent id] [--project path]
+  [--at time|--now] <text...>` (plus `list`/`remove`/`clear`) queues a
+  one-shot prompt that spawns a **brand-new** agent session in a project
+  directory once a usage limit clears. `--now`/`--at` (epoch, ISO-8601,
+  `+2h30m`, or a bare clock time) skip the reset wait; with no reset signal
+  at all, a `next-reset` entry delivers on the very next daemon tick and
+  `prompt add` prints a notice to that effect. Delivery is verified against
+  a fresh limit banner and backs off on failure — the same backoff floor
+  applies to every mode, capped at 5 attempts (same as resume) before an
+  entry is marked failed. `autoResume` does not gate delivery. Dashboard:
+  a new **Prompts** tab (`7`) — list, `a` to add, `d`/`x` to remove — plus a
+  queued-count hint on the Status tab. Fleet: `--host <name>` relays the
+  same subcommands to a registered host's own queue (`--project`/`--agent`
+  required, everything re-validated server-side); the new `remoteQueue`
+  setting (default on) lets a host opt out of all queue traffic, answering
+  a typed `disabled` instead of silently dropping it.
+- **Fleet password auth**: hosts can now use a password instead of an ssh key
+  — `unsnooze hosts add <name> <dest> --auth password --source
+  prompt|env|keychain|command` (`prompt` is interactive no-echo and the
+  default; `env`/`keychain`/`command` are daemon-capable). `keychain` is a
+  macOS-only built-in; Windows and Linux use `--source command` with a
+  per-OS recipe (Linux `pass`/`secret-tool`, Windows `powershell`/`op read`;
+  `security` is the macOS recipe — see README's per-OS table). `unsnooze hosts test <name>` pre-flights a host without
+  ever printing its secret. Auth-gapped hosts render as `needs-auth` in
+  `fleet`/the dashboard, distinct from `unreachable`. Security: the password
+  never touches argv, `ps`, or unsnooze's own environment — it flows through
+  OpenSSH's `SSH_ASKPASS` hook, helper-stdout → ssh, in-process; unsnooze
+  stores no plaintext itself; keys stay the unchanged, BatchMode-hardened
+  default.
+- **Fleet — sessions on every machine, over your own SSH**: `unsnooze hosts
+  [add|rm|list]` registers ssh destinations; `unsnooze fleet [--json]` and
+  the dashboard's new **Fleet** tab fan out to every host in parallel and
+  show each one's tracked sessions (state, reset countdown, attach hint),
+  with a bounded-concurrency ssh pool, per-host timeouts, and a 24h stale
+  cache so one dead box never blocks the rest. `unsnooze _remote` is the
+  single remote entrypoint (`status`/`resume`/`cancel`), safe to lock to an
+  `authorized_keys` forced command; `unsnooze status --json` and a shared
+  resume core back both the local and remote paths. Security posture: no
+  listening ports, no custom auth, no tokens — transport is plain OpenSSH
+  with host-key checking never weakened; the remote is always the one that
+  types, under its own gates; and every field a remote returns is
+  control-character-stripped, length-capped, and extracted into fresh
+  objects before it touches your terminal or state.
+- **Dashboard mouse support**: click tabs and session rows, wheel-scroll the
+  status/sessions lists and a real scrollback window in Logs, clickable
+  footer hints (refresh / help / quit). Full keyboard parity kept; `m` (or
+  `mouse` config / `UNSNOOZE_MOUSE`) toggles it live so terminal text
+  selection is one keypress away. Tracking modes are always cleared on exit,
+  crash, and Ctrl-Z — no hijacked mouse after quit.
+
+## 1.13.0 — 2026-07-17
+
+- **`unsnooze usage` — know the wall before you hit it**: burn-rate &
+  time-to-limit forecast per agent × window. Every figure carries its
+  provenance — `(exact)` from Codex rollouts or the opt-in Claude statusline
+  shim, `(calibrated from N stops)` learned from unsnooze's own recorded
+  limit stops, or `(estimated)` while calibrating. Weighted token burn
+  (cache reads ×0.1) over active minutes, account-wide including subagent
+  transcripts, per Opus/Sonnet bucket on Max plans. ETA shown as a band,
+  cross-checked against the observed reset time — never a false-precision
+  minute, never a blind now+5h.
+- **Pre-wall warnings from the daemon**: hybrid thresholds (80/95% and
+  ≤30/≤10 min to the wall at current pace), deduped per window instance,
+  with a `/compact now` nudge sized from the same context estimator as
+  `unsnooze status`. Notify-only — unsnooze still never types anything you
+  didn't configure.
+- **`unsnooze usage --install-statusline`**: opt-in shim that persists
+  Claude's exact server-side percentages; chains your existing statusline
+  command (backed up once, restored on uninstall).
+- **Live dashboard**: `unsnooze dashboard` (also `status`/`usage` on an
+  interactive TTY) — full-screen Ink TUI with Status, Usage, Sessions,
+  Doctor and Logs tabs, animated ❯ z z z brand mark, help overlay (`?`),
+  and a compact layout down to 80×24. Pipes and `--json` stay plain.
+- **Fix**: undated limit banners crossing midnight ("resets 12:04am" seen
+  at 9pm) parsed as already-past and were dropped or resumed due-now into a
+  still-live limit; they now roll to tomorrow when the announced time is
+  within a window's reach, while genuinely stale banners still resolve
+  due-now.
+- Codex windows are labeled from `window_minutes` everywhere (300 → 5h,
+  10080 → weekly, 43200 → 30d on the go plan) — stop records no longer
+  conflate the monthly window with the weekly bucket.
+
+## 1.12.2 — 2026-07-16
+
+- **Daemon autostart self-heal**: updating via npm never touches the
+  launchd/systemd unit file, so pre-1.12 users would keep the PATH-less unit
+  (daemon can't find tmux → every revival dies) until they manually re-ran
+  `unsnooze install --daemon`. The daemon now detects a PATH-less unit on
+  startup, regenerates it, and reloads itself — every affected user is fixed
+  automatically on their first daemon restart after updating (at the latest,
+  the next reboot). Manual `unsnooze install --daemon` still works and is no
+  longer required.
+
+## 1.12.1 — 2026-07-16
+
+- CI-only: pin the platform in a doctor test whose `launchctl` assertion
+  failed on Linux runners. No runtime changes — this is 1.12.0 plus a green
+  release pipeline (1.12.0 was tagged but never published).
+
+## 1.12.0 — 2026-07-16
+
+- **Daemon PATH fix** (fix: every launchd-daemon revival on Homebrew Macs died
+  silently with `spawn tmux ENOENT` — launchd gives daemons a bare
+  `/usr/bin:/bin:/usr/sbin:/sbin` and tmux lives in `/opt/homebrew/bin`): the
+  launchd plist and systemd unit now bake the install-time `PATH`. Re-run
+  `unsnooze install --daemon` once after updating to regenerate the unit.
+  Revival `new-window` failures are now logged (they were silent), and
+  `failed` records survive the sweeper so `unsnooze status` can show *why* a
+  session gave up (age-based prune still expires them).
+- **`unsnooze preview [id]`** — a true dry-run: per session, exactly what the
+  resumer WOULD do right now (type into which pane, drive the menu, reopen in
+  which session, probe, defer) and why — every gate (paused, not due, held by
+  workspace/context guard, backoff, attempt cap) spelled out, including the
+  final wake message with any guard suffix. Sends nothing, mutates nothing.
+  Preview shares its decision code (`planFor`/`assessPane`/guard evaluators)
+  with the real dispatcher, so it cannot drift. Exit codes: `0` nothing would
+  wake now, `2` at least one actionable wake, `1` error.
+- **ntfy push notifications** (`ntfyTopic` / `ntfyServer` / `ntfyToken` /
+  `ntfyPrivacy`) — off until a topic is set; fires *alongside* the local
+  channel on limit-hit / resumed / gave-up (gave-up pushes at high priority).
+  JSON-to-root publishing (emoji-safe titles), Bearer-token support for authed
+  or self-hosted servers, bodies capped, fire-and-forget with a 5s timeout.
+  `ntfyPrivacy=terse` keeps directory paths out of pushed bodies — ntfy.sh
+  topics are a public namespace, so the docs push unguessable topic names.
+- **Trust & security docs**: a "Trust & security" section at the top of the
+  README (what unsnooze types and never types, grounded in the actual
+  mechanisms) and a full `SECURITY.md` (threat model, honest residual risks,
+  private vulnerability reporting, supported versions). Enable GitHub Private
+  Vulnerability Reporting in the repo settings to activate the report button.
+- **Release provenance**: `.github/workflows/release.yml` publishes to npm on
+  `v*` tags via trusted publishing (OIDC, token-less) with
+  `--provenance` — after a one-time trusted-publisher setup on npmjs.com
+  (repo `saaranshM/unsnooze`, workflow `release.yml`).
+- **Reproducible demo**: `demo/demo.tape` (VHS) renders `assets/demo.gif` —
+  staged fixture ledger + stub agent, but the `unsnooze status` beat is real.
+- Note: the pre-release name `claude-session-guard` was never published to
+  npm, so there is nothing to deprecate on the registry; `unsnooze doctor
+  --fix` remains the migration path for local installs.
+
+## 1.11.0 — 2026-07-16
+
+- **`unsnooze doctor [--fix]`** — install health check + migration sweep for
+  the pre-release claude-session-guard (csg) install. Detects zombie csg
+  monitors/resumers, old launchd/systemd units, the orphaned
+  `~/.claude-session-guard` state dir, and the stale global package (even when
+  its `csg` bin symlink dangles). `--fix` stops the processes, unloads and
+  removes the units, and archives the state dir (never deletes data, never
+  runs npm — the `npm rm -g claude-session-guard` step stays yours).
+  `unsnooze install` now runs the detection and points at doctor when
+  leftovers exist.
+- **Pane identity & ownership** (fix: tmux pane ids are server-global and
+  recycled — a stale monitor or reap could type into or close somebody
+  else's pane): managed panes are stamped with a `@unsnooze_owner` pane
+  option at launch and revival; every message-injection, menu-drive, reap,
+  and auto-reap decision now answers two independent questions first —
+  *is this pane ours* (stamp/lease; a mismatched stamp vetoes even a
+  matching foreground command) and *is our agent still running in it*
+  (lease pid+birth or foreground command; the stamp alone never counts,
+  since it outlives the agent and the pane may now be the user's shell).
+  Monitors exit once their lease disappears instead of scraping whatever the
+  pane becomes. Legacy records without leases are never force-closed.
+- **Launch failures degrade instead of dying** (fix: a tmux-level
+  session-start failure — `duplicate session`, `open terminal failed`, dead
+  socket, nesting refusal, socket permission errors — used to exit with
+  tmux's status and no agent): launchWrapped now reads tmux's stderr,
+  distinguishes "session never started" from "session ran and ended", and
+  falls back to the unwatched agent CLI with a message.
+- **Zellij detection fix**: `capturePane` now dumps scrollback
+  (`dump-screen --full`) — a limit banner that scrolled between polls was
+  previously invisible on Zellij. Pre-0.35 zellij rejects the flag; capture
+  learns that once and degrades to the viewport-only form instead of
+  failing every poll.
+- **Reset-time correctness**: weekly "resets Tuesday 9am" wakes land on the
+  exact wall-clock time across DST boundaries (day-stepping used to drift
+  ±1h); a mangled banner clock ("resets 45:99") is rejected instead of
+  throwing; "wait <duration>" only parses when a duration actually follows
+  (no more summing stray durations out of prose).
+- **State safety**: sweepers use compare-and-set so `markStaleAbandoned` can
+  no longer clobber a record that resumed mid-sweep; the state lock records
+  its holder pid and is only ever stolen from a dead process; user-invoked
+  `reap` skips `resumed` panes that were active within `reapIdleAfter`
+  (closing a live working agent contradicted its own contract).
+- **Install backups**: the first-ever run snapshots your pristine
+  settings/rc as `.unsnooze-orig` (kept forever); `.unsnooze-bak` keeps
+  rolling per run.
+
+## 1.10.1 — 2026-07-16
+
+- **Upgrade-window fail-safe** (fix: `npm install -g` briefly leaves `bin/`
+  present with `src/` missing; the router then died with `MODULE_NOT_FOUND`
+  *inside* the freshly-wrapped tmux session — a visible open/close flash with
+  terminal-probe garbage — and the launchd daemon crash-looped thousands of
+  times into `daemon.log`): agent-launch paths (`_run`, bare `claude` args)
+  now degrade to the plain agent CLI when the package can't load; background
+  paths (hook, monitor, resumer, daemon, update-check) exit 0 quietly. Only
+  module *load* failures are caught — runtime errors still surface, and an
+  agent that already ran is never re-run.
+- **Daemon crash-loop guards**: launchd plist gains `ThrottleInterval 30`;
+  the systemd unit moves to `Restart=always` + `RestartSec=30` (a clean
+  exit-0 must also respawn — `on-failure` would leave the daemon dead after
+  an intentional exit) with the start rate-limit disabled so a long broken
+  install can never trip the unit into a permanent `failed` state. A
+  version-skew watch makes a long-lived daemon exit cleanly (and get
+  restarted on fresh code) when `npm -g` swaps the package underneath it —
+  no more zombie daemons running deleted code.
+- **Log rotation**: `unsnooze.log` and `daemon.log` are capped at 5 MB with
+  one rotated generation (`.1`) — a crash-loop can no longer grow a log
+  without bound. `daemon.log` is rotated copy-truncate style because launchd
+  holds its fd open for the daemon's whole lifetime.
+- **Resume-retry backoff** (fix: five resume attempts burned in ~2 minutes
+  when a revival kept failing): failed attempts now back off exponentially
+  (1m, 2m, 4m… capped at 30m). Manual `resume-now` records are exempt — an
+  explicit immediate wake is never silently deferred. After `unsnooze` gives
+  up, a session re-arms only on a fresh limit detection.
+- **Singleton-lock hygiene**: the resumer lock is acquired atomically
+  (`wx`), a lock held by a recycled pid that is not actually an unsnooze
+  process is taken over instead of honored forever, and the daemon's
+  "another resumer holds the lock" log line is throttled to ~once per 15
+  minutes instead of every 30 s tick.
+- **Update notice on the launch path**: wrapper-only users (who never run
+  `unsnooze status`) now get the one-line "new version available" notice on
+  stderr right after their agent session ends — outer terminal only, TTY
+  only, never in `-p/--print` runs, at most once per day. The launch path
+  also refreshes the daily version-check cache.
+
+## 1.10.0 — 2026-07-14
+
+- **Session-name ownership** (fix: interactive `claude` dying with
+  `duplicate session: unsnooze`): the interactive launcher owns the base name
+  `unsnooze` (and `unsnooze-2`… on collision); the resumer daemon may join a
+  live session but only ever **creates** `unsnooze-resumed`. Records now
+  discover the live mux session via `sessionForPane` instead of freezing the
+  load-time `MUX_SESSION_NAME` constant. tmux `newWindow` returns
+  `paneOwner: null` (pane ids are server-global). Uninstall stops the resumer.
+  Failed session creation degrades to an unwatched agent CLI instead of
+  bricking `claude`/`codex`. New: `unsnooze sessions`, `unsnooze reap
+  [--dry-run|--yes]`; optional `reapResumed` / `reapIdleAfter`. Zellij revival
+  uses `--close-on-exit` and closes the default shell pane left by
+  `attach -b -c`. Env: `UNSNOOZE_SESSION_NAME`, `UNSNOOZE_RESUME_SESSION`.
+- **Reset-time accuracy** (fix: blind `now + 5h` fallback and +24h rollover
+  of already-past clock times): reset times are anchored to the banner's own
+  timestamp (`bannerAt`), not the scrape moment. Claude stops prefer the dated
+  transcript entry over an undated pane scrape. An absolute clock time already
+  past relative to wall clock means the limit already reset (due now), not
+  tomorrow. Compact durations like `1h 30m` sum all tokens. Unparseable banners
+  probe cheaply (`PROBE_INTERVAL_MS`, backoff to `PROBE_MAX_MS`) instead of
+  sleeping five hours; hard ceiling remains `FALLBACK_RESET_MS`. Monitor first
+  tick requires corroboration; later ticks can upgrade a weak estimate.
+  `unsnooze status` shows provenance (`absolute, from transcript` vs
+  `guessed: no reset time found — probing`).
+- **Upgrade-safe state migration** for existing installs: `tmuxSession` →
+  `muxSession` (unchanged), bogus tmux `paneOwner` values cleared so leases
+  match again, old blind `fallback` waits beyond the probe ladder are pulled
+  into the first probe window (absolute/relative schedules untouched),
+  `TMUX_SESSION_NAME` alias kept, `reapResumed` defaults off, new config keys
+  only add defaults (existing `config.json` keeps working without edits).
+
+## 1.9.0 — 2026-07-13
+
+- **Context-size guard** (`contextGuard`: `off` | `inform` | `pause`, default
+  `inform`; threshold `contextGuardTokens`, default `100000`): waking a
+  session hours after a limit stop re-reads its entire context at full
+  uncached price (the provider's prompt cache expires in minutes) — a
+  150k-token session can eat a real slice of a fresh 5-hour window the moment
+  it wakes. unsnooze now estimates the size from the session transcript (the
+  last `message.usage` entry, tail-read) before dispatch: `inform` resumes
+  and notifies you of the price once the wake lands; `pause` holds sessions
+  at or above the threshold (`held: context ~152k tokens` in status) until
+  `unsnooze resume-now`, which always bypasses the guard. The estimate also
+  shows per-session in `unsnooze status` (`ctx ~152k tok`). Claude Code only
+  for now — the agent-adapter hook (`contextTokens`) is open for Codex, whose
+  rollout `token_count` events carry the same data. Prompted by r/ClaudeAI
+  feedback on a resume consuming 30% of a 5h quota.
+
+## 1.8.1 — 2026-07-13
+
+- **Discovery / SEO**: package description and keywords expanded so npm and
+  GitHub surface Qwen Code, Kimi CLI, OpenCode, Antigravity, OpenRouter, and
+  Zellij alongside Claude/Codex/Grok. README comparison table updated to match.
+
+## 1.8.0 — 2026-07-13
+
+- **Notification channels** (`notifyChannel`: `auto` | `native` | `osc` |
+  `bell`, env `UNSNOOZE_NOTIFY_CHANNEL`): terminal-branded alerts via OSC 9
+  (iTerm2, kitty, WezTerm, Ghostty, Warp) or OSC 777 (rxvt), plus BEL on the
+  pane tty. `auto` sends OSC+BEL when tmux can reach client/pane ttys and
+  falls back to the OS toast only if OSC delivered nothing; denylisted
+  terminals (Apple Terminal, VS Code, Alacritty, Zed) skip OSC in auto.
+  OSC/BEL require tmux — Zellij and GUI-watcher stops use native. Existing
+  `notifications` remains the master off-switch.
+- **Unified ChatGPT desktop app support** (July 2026: the Codex app became the
+  ChatGPT app). Verified against a real install: the app's bundled
+  `codex app-server` still writes rollouts to `~/.codex/sessions/` in the same
+  format (now with additive `limit_id`/`credits`/`plan_type` fields and
+  reason-string `rate_limit_reached_type` values — both handled), and
+  `codex resume <uuid>` works for app-originated sessions. New: when `codex`
+  is not on PATH but ChatGPT.app is installed, unsnooze resolves the
+  app-bundled binary (`ChatGPT.app/Contents/Resources/codex`) for wrappers,
+  wizard detection, and revival. Rollouts older than 7 days are now
+  zstd-compressed by codex; irrelevant for detection (freshness window is
+  minutes) but noted for `unsnooze report` archaeology.
+- Added a dual tmux/Zellij multiplexer backend. The new `multiplexer` setting
+  accepts `auto`, `tmux`, or `zellij`; status output identifies the backend,
+  qualified pane address, and revival session. Zellij revival uses structured
+  pane ownership and a reserved-session smoke test without adding a statusline
+  notification path.
+
+## 1.7.0 — 2026-07-12
+
+- **Four new agent adapters** (all ⚠️ experimental, off by default — enable in
+  `unsnooze setup`):
+  - **Qwen Code** (`qwen`): Claude-shaped `StopFailure` hook installed into
+    `~/.qwen/settings.json` + verbatim quota-banner scraping (legacy OAuth,
+    Coding Plan `Allocated quota exceeded` → 5h window, OpenRouter
+    passthroughs). Resumes via `qwen --resume <id>`, ids from qwen's
+    `*.runtime.json` sidecars.
+  - **Kimi CLI** (`kimi`): detects the terminal red
+    `Error code: 429 … rate_limit_reached_error` line; resumes via
+    `kimi -r <id> -p "<msg>"` with an on-disk id check (kimi silently starts a
+    NEW session for unknown ids). `Membership expired` is notify-only.
+  - **OpenCode** (`opencode`): OpenCode self-retries limits forever (sleeping
+    until reset), so unsnooze records the stop, never touches a live
+    self-retrying pane, and revives dead panes mid-wait via
+    `opencode -s <ses_id>` — reset time parsed from the
+    `[retrying in 2h5m attempt #N]` countdown.
+  - **Antigravity CLI** (`agy`, Google's Gemini-CLI successor): scrapes
+    `Model quota limit exceeded` / `Refreshes in 6 days and 18 hours`
+    (multi-day refresh = weekly cap); `503 MODEL_CAPACITY_EXHAUSTED` is treated
+    as transient overload. Resumes via `agy --conversation=<id>`.
+- **OpenRouter awareness**: 429 bodies (`Rate limit exceeded: limit_…`,
+  free-models-per-day) are detected inside OpenCode/Qwen sessions; credit
+  exhaustion (402) notifies instead of snoozing.
+- **Terminal-error channel**: non-resetting errors (credits exhausted,
+  membership expired, discontinued tiers) now raise a single desktop
+  notification instead of being retried against a reset that will never come.
+- **time-parser**: understands `Refreshes in 6 days and 18 hours`,
+  `It will reset in 2 hours 5 minutes`, `Retry in 45 minutes`, and Go-style
+  countdowns (`2h5m`, `2m 5s`, `~2 days`).
+
+## 1.6.0 — 2026-07-12
+
+- **Stale-workspace guard** (`workspaceGuard`: `off` | `inform` | `pause`,
+  default `inform`): the repo's HEAD + dirty state are fingerprinted when a
+  session stops and re-checked at wake. `inform` resumes with a "workspace
+  changed while you slept — re-read before acting" note in the wake message;
+  `pause` holds the session (desktop notification, `workspace changed` marker
+  in status) until `unsnooze resume-now`, which prints the diff stat first.
+  Non-git directories are unaffected. Suggested by r/codex feedback.
+
+## 1.5.0 — 2026-07-12
+
+- **`unsnooze update`**: one command to update unsnooze itself — runs
+  `npm install -g unsnooze@latest` and immediately prints the new version's
+  changelog. Update notices and the daemon toast now say `run: unsnooze
+  update` instead of the raw npm command.
+
+## 1.4.0 — 2026-07-12
+
+- **Update notices**: unsnooze now checks the npm registry (at most once a
+  day, a plain GET with nothing identifying) and tells you when a new version
+  is out — a one-line notice after CLI commands, and a single desktop toast
+  per version from the daemon. After you update, the next command shows a
+  short "what's new" straight from the bundled changelog. Turn it all off
+  with `unsnooze config set updateCheck off`.
+
+## 1.3.0 — 2026-07-11
+
+- **Per-session wake messages**: `unsnooze message <id|--all> "<text>"` sets a
+  custom resume message for specific tracked sessions (`--clear` reverts).
+  Precedence: per-session → per-agent (`resumeMessages.<id>`) → global
+  `resumeMessage`. Applies on both wake paths — typed into a live pane, or
+  carried in argv for `codex resume` — and sessions with a custom message
+  show a `msg: "…"` marker in `unsnooze status`.
+
+## 1.2.0 — 2026-07-10
+
+### GUI surfaces: VS Code extension, desktop apps
+
+Sessions running outside a terminal — Claude Code's VS Code extension and
+desktop app, Codex's IDE extension and desktop app — are now guarded too.
+There is no pane to scrape and (for Codex) no hook, so detection tails the
+session files the CLIs already write:
+
+- **Claude Code**: rate-limit stops land in `~/.claude/projects` transcripts
+  as structured entries (`error:"rate_limit"`, session id, cwd, reset text).
+  The new watcher turns them into ledger records; the weekly banner form
+  ("resets Jul 4 at 12:30am (tz)") now parses, DST-safe.
+- **Codex**: rollouts never persist error events, but every turn's
+  `token_count` event carries a `rate_limits` snapshot (`used_percent`,
+  `resets_at` epoch). An exhausted window becomes a stop with an exact epoch
+  reset — more precise than any scraped banner — and works for every Codex
+  surface, since they share `~/.codex/sessions`.
+- **Claude desktop (cowork) sessions** *(experimental, macOS)*: sandboxed
+  sessions under `~/Library/Application Support/Claude` are detected, and
+  revival exports the session's isolated `CLAUDE_CONFIG_DIR` together with
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR=''` so auth resolves through the default
+  keychain entry (the sandbox holds no credentials). Verified end-to-end
+  against a real desktop session.
+
+Revival stays terminal-based: when the limit resets, the session reopens in a
+tmux window via `claude --resume <id>` / `codex resume <id>` — the same
+session file continues, so the conversation stays visible in the GUI's own
+history. Resuming *inside* the GUI panels is not possible today (no IPC/URI
+sends a prompt into them).
+
+- **`unsnooze daemon`**: persistent watcher process; `unsnooze install
+  --daemon` (or the new wizard step) installs it as a launchd agent (macOS)
+  or systemd user unit (Linux) so GUI sessions are watched without a shell.
+- **`guiWatch` setting** (default on) gates the watching; `unsnooze status`
+  shows each stop's origin (`cli`, `vscode`, `desktop`, …).
+- Ledger dedupe: transcript records merge with hook/scrape records of the
+  same session, so terminal sessions are never double-resumed.
+
+## 1.1.0 — 2026-07-10
+
+### Per-agent resume messages
+
+- **`resumeMessages.claude` / `.codex` / `.grok`**: optional per-agent override
+  of the global `resumeMessage` — `unsnooze config set resumeMessages.codex
+  "..."` or `UNSNOOZE_RESUME_MESSAGE_CODEX`. Empty means "use the global
+  message"; clear with `unsnooze config set resumeMessages.codex ""`.
+  Specificity beats source: a per-agent file value outranks a global env var.
+- **Setup wizard** asks for per-agent messages, prefills every message prompt
+  from the existing config, and merges over the config file — re-runs no
+  longer clobber values set via `unsnooze config`.
+- Blank or whitespace-only messages are never sent: resolution falls through
+  to the global message, then the built-in default.
+
+### CLI & fixes
+
+- **`-h` / `--help`** now print the unsnooze help (previously only
+  `unsnooze help`), and the usage documents every command.
+- **Install**: `unsnooze setup` / `install` no longer crashes with ENOENT on
+  machines without a `~/.claude/` directory.
+- `unsnooze config set <key> ""` is a valid way to clear string overrides, and
+  a config file holding non-object JSON is treated as empty instead of
+  corrupting later writes.
+
+## 1.0.0 — 2026-07-10
+
+First public release (previously the private `claude-session-guard`/`csg`).
+
+### Multi-CLI auto-resume
+
+- **Claude Code and OpenAI Codex CLI fully supported; xAI Grok Build
+  experimental** (generic patterns + `unsnooze report` to contribute real
+  banner captures).
+- **Agent adapters** (`src/agents/`): per-CLI banner regexes, busy/idle
+  markers, resume invocation, session-store lookup, hook wiring.
+- **Codex specifics**: verbatim banner strings from the Codex source; parses
+  `try again at 3:51 PM`, `Feb 23rd, 2026 9:01 PM`, and
+  `in 4 days 20 hours 9 minutes`; dead sessions revive via
+  `codex resume <id> "<message>"` — the prompt travels in argv, nothing is
+  typed into the pane.
+
+### Settings & UX
+
+- **Settings**: `~/.unsnooze/config.json`, `unsnooze config list/get/set`,
+  toggles for autoResume, menuAutoAnswer, notifications, resumeMessage, and
+  per-agent enablement (env > file > default).
+- **Setup wizard**: `unsnooze setup` — detects installed CLIs, warns when
+  `grok` is the community CLI rather than Grok Build, installs wrappers
+  (zsh + bash) and hooks.
+- **Desktop notifications** on limit detected / session resumed / gave up
+  (macOS osascript, Linux notify-send, tmux fallback).
+
+### Windows / WSL
+
+- **Windows via WSL**: native Windows toast notifications from inside WSL via
+  `powershell.exe` (no notify-send/X server needed), `where`-based CLI
+  detection, and a friendly "install tmux / use WSL" message instead of a
+  hard failure when tmux is missing (the agent CLI still runs, just
+  unwatched). The tmux-independent core is exercised on Windows in CI.
+
+### Safety hardening
+
+- **Wrappers and hooks can never brick the wrapped CLI**: the shell wrapper
+  falls through to the real `claude`/`codex`/`grok` when the unsnooze entry
+  point is missing, and hook commands no-op (`exit 0`) instead of erroring on
+  every turn.
+- **Menus are answered from the visible screen only**, never from tmux
+  scrollback — an already-answered menu in history can no longer trigger
+  stray keystrokes (relevant for non-alt-screen TUIs like
+  `codex --no-alt-screen`).
+- **Session reopen uses absolute node + entry-point paths** instead of a PATH
+  lookup — a tmux server started without npm globals (or nvm's node) on PATH
+  can no longer break revival with command-not-found.
+- Migrates cleanly off `claude-auto-retry` and the pre-release csg install
+  (fenced rc blocks and settings.json hook entries are replaced, with
+  backups).
+
+### Testing
+
+- 104 unit tests plus a **12-scenario end-to-end suite**
+  (`scripts/e2e-simulate.sh`) that exercises every agent and safety path in
+  real tmux with real monitor/hook/resumer processes — banner detection for
+  all three CLIs, raw-key menu driving with selection verification, hook
+  ingestion, dead-pane and live-pane resume, both toggles, and the
+  529-overload retry ladder (now env-tunable via
+  `UNSNOOZE_OVERLOAD_BACKOFF_S`).
+- CI: Ubuntu + macOS (Node 20/22) and Windows (Node 22).

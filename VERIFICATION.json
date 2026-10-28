@@ -1,0 +1,45 @@
+{
+  "version": "1.20.1-henry-codex-gui.20261028",
+  "verifiedOn": "2026-10-28",
+  "platform": "Windows",
+  "node": "v24.15.0",
+  "packageFile": "unsnooze-1.20.1-henry-codex-gui.20261028.tgz",
+  "packageSha256": "d1be8a7b6dc147271d40ced25cce630ebce67fad4d60c66b4ffb4a96bf26aa1b",
+  "npmPackEntries": 82,
+  "installation": {
+    "isolatedPrefix": true,
+    "offlineCache": true,
+    "lifecycleScriptsDisabled": true,
+    "registryPublish": false,
+    "modifiedDeveloperGlobalInstall": false
+  },
+  "smokeChecks": {
+    "installedCommandHelp": "pass",
+    "installedEffectiveDefaultPrompt": "pass",
+    "runtimeFileHashComparison": "pass",
+    "runtimeFilesCompared": 76
+  },
+  "focusedTests": {
+    "total": 39,
+    "passed": 39,
+    "failed": 0,
+    "skipped": 0,
+    "source": "Three included Desktop/settings test files, copied into the isolated installed package and run against its shipped runtime",
+    "desktopSendCases": "Mocked"
+  },
+  "privacy": {
+    "allowlistedExport": true,
+    "personalPathAndCredentialPatternScanMatches": 0,
+    "liveConfigIncluded": false,
+    "logsIncluded": false,
+    "chatHistoryIncluded": false,
+    "realFixtureThreadIdReplaced": true,
+    "note": "Pattern checks are not an exhaustive secret scanner; files were exported only from runtime source, selected tests and public project documentation."
+  },
+  "limitations": [
+    "Not a clean-machine or recipient-machine end-to-end Desktop test.",
+    "No automatic message sent to a live chat during packaging.",
+    "New unattended prompt behavior across a future quota reset remains unverified.",
+    "Compatibility depends on Codex Desktop local app-tools protocol."
+  ]
+}

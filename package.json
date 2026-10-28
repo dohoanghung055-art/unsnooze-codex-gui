@@ -1,0 +1,99 @@
+{
+  "name": "unsnooze",
+  "version": "1.20.1-henry-codex-gui.20261028",
+  "unsnoozePin": {
+    "id": "henry-codex-gui-20261028",
+    "upstreamCommit": "fe3c34f97cf4cb4f86e76734ba44b94b802b4de2",
+    "reason": "Personal fork for Windows Codex GUI; retain Desktop writer/settings, compatible pipe discovery, unattended prompt, and duplicate-send protection."
+  },
+  "description": "Henry personal Unsnooze fork, focused on Windows Codex Desktop GUI resume and unattended continuation.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "codex",
+    "codex-cli",
+    "openai",
+    "anthropic",
+    "grok",
+    "xai",
+    "qwen",
+    "qwen-code",
+    "kimi",
+    "kimi-cli",
+    "moonshot",
+    "opencode",
+    "antigravity",
+    "cursor",
+    "cursor-cli",
+    "cursor-agent",
+    "antigravity-cli",
+    "gemini",
+    "google",
+    "openrouter",
+    "chatgpt",
+    "usage-limit",
+    "usage limit",
+    "rate-limit",
+    "rate limit",
+    "5-hour limit",
+    "weekly limit",
+    "auto-resume",
+    "auto-retry",
+    "resume",
+    "retry",
+    "tmux",
+    "zellij",
+    "herdr",
+    "ai-agents",
+    "agentic-coding",
+    "cli",
+    "developer-tools",
+    "windows",
+    "powershell",
+    "claude-design",
+    "mcp",
+    "headless",
+    "wsl",
+    "cmux"
+  ],
+  "author": "Saaransh Menon <saaransh.dev2811@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/saaranshM/unsnooze.git"
+  },
+  "bugs": {
+    "url": "https://github.com/saaranshM/unsnooze/issues"
+  },
+  "homepage": "https://unsnooze.dev",
+  "type": "module",
+  "bin": {
+    "unsnooze": "bin/unsnooze.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "README-UPSTREAM.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "DEFAULT-RESUME-PROMPT.txt"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.7.0",
+    "ink": "^7.1.1",
+    "picocolors": "^1.1.1",
+    "react": "^19.2.7"
+  },
+  "contributors": [
+    {
+      "name": "Henry (personal Codex GUI modifications)"
+    }
+  ]
+}

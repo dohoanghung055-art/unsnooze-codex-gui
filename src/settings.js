@@ -1,0 +1,309 @@
+// User-facing settings: ~/.unsnooze/config.json, managed by `unsnooze config`
+// and the setup wizard. Precedence per key: env var > config file > default —
+// env stays the power-user/test escape hatch, the file is what the wizard
+// writes. One cross-key exception: the resume message resolves by specificity
+// first, so a per-agent resumeMessages.<id> value (from either source) beats
+// the global resumeMessage even when the global came from an env var (see
+// resolveResumeMessage).
+
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { MUX_NAMES, STATE_DIR, ensureStateDir, writePrivateFile } from './config.js';
+
+export const CONFIG_FILE = () => join(process.env.UNSNOOZE_STATE_DIR || STATE_DIR, 'config.json');
+
+export const DEFAULTS = {
+  multiplexer: 'auto',    // auto | tmux | zellij | herdr | cmux
+  autoResume: true,        // master switch: dispatch resumes when limits reset
+  menuAutoAnswer: true,    // may unsnooze drive Claude's limit menu (send keys)?
+  notifications: true,     // desktop notifications on detect/resume
+  notifyChannel: 'auto',   // auto | native | osc | bell
+  // ntfy push (https://ntfy.sh) — ADDITIVE to notifyChannel; off until a
+  // topic is set. ntfy.sh topics are public: the name is the password —
+  // use `unsnooze config set ntfyTopic $(unsnooze doctor)`-style random
+  // names (generateNtfyTopic) or a self-hosted/authed server.
+  ntfyTopic: '',           // '' = ntfy off
+  ntfyServer: 'https://ntfy.sh',
+  ntfyToken: '',           // optional Bearer token (tk_…) for authed servers
+  ntfyPrivacy: 'full',     // full | terse (terse: never push cwd paths)
+  guiWatch: true,          // daemon watches transcripts/rollouts for GUI-session stops
+  updateCheck: true,       // daily registry version check + update notices/toast
+  workspaceGuard: 'inform', // repo changed while stopped: off | inform | pause
+  contextGuard: 'inform',   // wake re-reads a big cold context: off | inform | pause
+  contextGuardTokens: 100_000, // contextGuard notify/hold threshold (tokens)
+  // Pre-wall usage warnings (1.13): daemon notifies at % bands + ETA tiers.
+  usageWarn: 'notify',     // off | notify
+  usageWarnAt: '80,95',    // % thresholds (comma-separated); garbage → default
+  mouse: true,             // dashboard mouse support (click tabs/rows, wheel scroll)
+  // Opt-in: auto-close `resumed` panes idle longer than reapIdleAfter (ms).
+  // Off by default — an idle revived TUI is indistinguishable from one the
+  // user will return to. Explicit cleanup: `unsnooze reap --yes`.
+  reapResumed: false,
+  reapIdleAfter: 7 * 86_400_000,
+  // Per-host opt-out for the fleet prompt queue's four remote verbs (set on
+  // THIS host — the one being controlled — not the controller); a forced
+  // command that answers 'disabled' still returns a valid framed envelope.
+  remoteQueue: true,
+  resumeMessage: "This is an automatic resume message from Unsnooze, not a new request written by the user. The previous turn was interrupted by a usage limit. I am away from the computer and cannot respond.\n\nResume the latest authorized task from its current checkpoint. Re-read the relevant task history, plan, files, and unfinished work before choosing the next action. Do not ask questions, request confirmation, or wait for a reply. Resolve routine choices from the available evidence and use reasonable, reversible assumptions when appropriate.\n\nIf a step needs my presence, credentials, an interactive login, a decision only I can make, or new approval, defer that step and its dependent work. Record the exact blocker, then immediately continue with other useful, independent work that is already authorized. One blocked branch is not a reason to stop the whole task.\n\nContinue through implementation, investigation, necessary validation, and follow-up fixes within the existing scope. Do not stop after an initial finding, a plan, a minor milestone, or a status update while useful authorized work remains. Before ending the turn, explicitly check the remaining plan and unresolved findings for steps you can still complete without me; if any exist, do them.\n\nPreserve the original scope, constraints, session settings, and permissions. Do not bypass required approval or authentication, invent missing data, repeat unchanged failed attempts, create busywork, or treat this automated message as consent for new external or irreversible actions.\n\nStop only when the requested objective is verified complete, no useful authorized work can proceed without me or an external change, or a hard execution limit prevents further progress. If blocked, save a concise checkpoint stating what is done, what remains, the exact blockers, and the concrete next action when I return. Do not end with a question or an offer to continue.",
+  resumeMessages: { claude: '', codex: '', grok: '', qwen: '', kimi: '', opencode: '', agy: '', cursor: '' },  // per-agent override; '' = use resumeMessage
+  // Extra argv appended when unsnooze itself launches the agent binary (dead-pane
+  // reopen, queued prompts). Space-separated. Lets a revived session match the
+  // user's normal launch mode — shell aliases don't apply to direct spawns
+  // (e.g. claude users who always launch with --dangerously-skip-permissions).
+  resumeExtraArgs: { claude: '', codex: '', grok: '', qwen: '', kimi: '', opencode: '', agy: '', cursor: '' },
+  // Extra argv for launches the USER performs through the shell wrapper — the
+  // launch-side twin of resumeExtraArgs. A flag that has to hold for the whole
+  // session (claude's --autocompact, which decides when the context window is
+  // compacted) is useless if it only applies to revives, because the session
+  // that runs out of context is the one the user started.
+  launchExtraArgs: { claude: '', codex: '', grok: '', qwen: '', kimi: '', opencode: '', agy: '', cursor: '' },
+  // Window priming (experimental, see prime.js): one tiny prompt at primeAt
+  // (local HH:MM, or auto = learned from history) starts the 5-hour window
+  // early. '' = off.
+  primeAt: { claude: '', codex: '' },
+  primeModel: { claude: '', codex: '' },   // '' = claude haiku / codex's cheapest cached model
+  primeDays: 'daily',                      // daily | weekdays
+  agents: { claude: true, codex: true, grok: false, qwen: false, kimi: false, opencode: false, agy: false, cursor: false },   // experimental agents default off
+};
+
+// Env override per key. Booleans accept 1/0, true/false, on/off, yes/no.
+const ENV_NAMES = {
+  multiplexer: 'UNSNOOZE_MULTIPLEXER',
+  autoResume: 'UNSNOOZE_AUTO_RESUME',
+  menuAutoAnswer: 'UNSNOOZE_MENU_AUTO_ANSWER',
+  notifications: 'UNSNOOZE_NOTIFICATIONS',
+  notifyChannel: 'UNSNOOZE_NOTIFY_CHANNEL',
+  ntfyTopic: 'UNSNOOZE_NTFY_TOPIC',
+  ntfyServer: 'UNSNOOZE_NTFY_SERVER',
+  ntfyToken: 'UNSNOOZE_NTFY_TOKEN',
+  ntfyPrivacy: 'UNSNOOZE_NTFY_PRIVACY',
+  guiWatch: 'UNSNOOZE_GUI_WATCH',
+  updateCheck: 'UNSNOOZE_UPDATE_CHECK',
+  workspaceGuard: 'UNSNOOZE_WORKSPACE_GUARD',
+  contextGuard: 'UNSNOOZE_CONTEXT_GUARD',
+  contextGuardTokens: 'UNSNOOZE_CONTEXT_GUARD_TOKENS',
+  usageWarn: 'UNSNOOZE_USAGE_WARN',
+  usageWarnAt: 'UNSNOOZE_USAGE_WARN_AT',
+  mouse: 'UNSNOOZE_MOUSE',
+  reapResumed: 'UNSNOOZE_REAP_RESUMED',
+  reapIdleAfter: 'UNSNOOZE_REAP_IDLE_AFTER',
+  remoteQueue: 'UNSNOOZE_REMOTE_QUEUE',
+  resumeMessage: 'UNSNOOZE_RESUME_MESSAGE',
+  'resumeMessages.claude': 'UNSNOOZE_RESUME_MESSAGE_CLAUDE',
+  'resumeMessages.codex': 'UNSNOOZE_RESUME_MESSAGE_CODEX',
+  'resumeMessages.grok': 'UNSNOOZE_RESUME_MESSAGE_GROK',
+  'resumeMessages.qwen': 'UNSNOOZE_RESUME_MESSAGE_QWEN',
+  'resumeMessages.kimi': 'UNSNOOZE_RESUME_MESSAGE_KIMI',
+  'resumeMessages.opencode': 'UNSNOOZE_RESUME_MESSAGE_OPENCODE',
+  'resumeMessages.agy': 'UNSNOOZE_RESUME_MESSAGE_AGY',
+  'resumeMessages.cursor': 'UNSNOOZE_RESUME_MESSAGE_CURSOR',
+  'resumeExtraArgs.claude': 'UNSNOOZE_RESUME_EXTRA_ARGS_CLAUDE',
+  'resumeExtraArgs.codex': 'UNSNOOZE_RESUME_EXTRA_ARGS_CODEX',
+  'resumeExtraArgs.grok': 'UNSNOOZE_RESUME_EXTRA_ARGS_GROK',
+  'resumeExtraArgs.qwen': 'UNSNOOZE_RESUME_EXTRA_ARGS_QWEN',
+  'resumeExtraArgs.kimi': 'UNSNOOZE_RESUME_EXTRA_ARGS_KIMI',
+  'resumeExtraArgs.opencode': 'UNSNOOZE_RESUME_EXTRA_ARGS_OPENCODE',
+  'resumeExtraArgs.agy': 'UNSNOOZE_RESUME_EXTRA_ARGS_AGY',
+  'resumeExtraArgs.cursor': 'UNSNOOZE_RESUME_EXTRA_ARGS_CURSOR',
+  'launchExtraArgs.claude': 'UNSNOOZE_LAUNCH_EXTRA_ARGS_CLAUDE',
+  'launchExtraArgs.codex': 'UNSNOOZE_LAUNCH_EXTRA_ARGS_CODEX',
+  'launchExtraArgs.grok': 'UNSNOOZE_LAUNCH_EXTRA_ARGS_GROK',
+  'launchExtraArgs.qwen': 'UNSNOOZE_LAUNCH_EXTRA_ARGS_QWEN',
+  'launchExtraArgs.kimi': 'UNSNOOZE_LAUNCH_EXTRA_ARGS_KIMI',
+  'launchExtraArgs.opencode': 'UNSNOOZE_LAUNCH_EXTRA_ARGS_OPENCODE',
+  'launchExtraArgs.agy': 'UNSNOOZE_LAUNCH_EXTRA_ARGS_AGY',
+  'launchExtraArgs.cursor': 'UNSNOOZE_LAUNCH_EXTRA_ARGS_CURSOR',
+  'primeAt.claude': 'UNSNOOZE_PRIME_AT_CLAUDE',
+  'primeAt.codex': 'UNSNOOZE_PRIME_AT_CODEX',
+  'primeModel.claude': 'UNSNOOZE_PRIME_MODEL_CLAUDE',
+  'primeModel.codex': 'UNSNOOZE_PRIME_MODEL_CODEX',
+  primeDays: 'UNSNOOZE_PRIME_DAYS',
+  'agents.claude': 'UNSNOOZE_AGENT_CLAUDE',
+  'agents.codex': 'UNSNOOZE_AGENT_CODEX',
+  'agents.grok': 'UNSNOOZE_AGENT_GROK',
+  'agents.qwen': 'UNSNOOZE_AGENT_QWEN',
+  'agents.kimi': 'UNSNOOZE_AGENT_KIMI',
+  'agents.opencode': 'UNSNOOZE_AGENT_OPENCODE',
+  'agents.agy': 'UNSNOOZE_AGENT_AGY',
+  'agents.cursor': 'UNSNOOZE_AGENT_CURSOR',
+};
+
+const KNOWN_KEYS = Object.keys(ENV_NAMES);
+
+// String settings restricted to a fixed set of values.
+const ENUMS = {
+  multiplexer: ['auto', ...MUX_NAMES],
+  workspaceGuard: ['off', 'inform', 'pause'],
+  contextGuard: ['off', 'inform', 'pause'],
+  notifyChannel: ['auto', 'native', 'osc', 'bell'],
+  ntfyPrivacy: ['full', 'terse'],
+  usageWarn: ['off', 'notify'],
+  primeDays: ['daily', 'weekdays'],
+};
+
+function parseBool(raw) {
+  if (/^(1|true|on|yes)$/i.test(raw)) return true;
+  if (/^(0|false|off|no)$/i.test(raw)) return false;
+  return null;
+}
+
+export function readFileConfig() {
+  try {
+    const parsed = JSON.parse(readFileSync(CONFIG_FILE(), 'utf-8'));
+    // Wrong-typed but valid JSON (a bare string/array) counts as corrupt too.
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};   // missing or corrupt file → defaults (never crash the hook path)
+  }
+}
+
+function dig(obj, key) {
+  return key.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+}
+
+export function getConfig(key) {
+  if (!KNOWN_KEYS.includes(key)) throw new Error(`unsnooze: unknown setting "${key}"`);
+  const def = dig(DEFAULTS, key);
+  const env = process.env[ENV_NAMES[key]];
+  if (env !== undefined && env !== '') {
+    if (typeof def === 'boolean') {
+      const b = parseBool(env);
+      if (b !== null) return b;
+    } else if (typeof def === 'number') {
+      const n = parseInt(env, 10);
+      if (Number.isFinite(n)) return n;
+    } else {
+      return env;
+    }
+  }
+  const fromFile = dig(readFileConfig(), key);
+  if (fromFile === undefined) return def;
+  if (typeof def === 'number') {
+    // Hand-edited files may hold anything; a non-numeric value must not
+    // silently disable a threshold — fall back to the default instead.
+    const n = Number(fromFile);
+    return Number.isFinite(n) ? n : def;
+  }
+  return fromFile;
+}
+
+// The message to send a given agent: its resumeMessages.<id> override when
+// set, else the global resumeMessage. Unknown agent ids fall back to global;
+// blank values (empty or whitespace-only) fall through to the next level so a
+// blank message is never sent.
+export function resolveResumeMessage(agentId) {
+  const key = `resumeMessages.${agentId}`;
+  const set = v => (typeof v === 'string' && v.trim() ? v : '');
+  const perAgent = agentId && KNOWN_KEYS.includes(key) ? getConfig(key) : '';
+  return set(perAgent) || set(getConfig('resumeMessage')) || DEFAULTS.resumeMessage;
+}
+
+// Extra argv for agent launches unsnooze performs itself. Space-separated
+// string in config → array. Unknown agents and blank values yield [].
+// Split a command-line string the way a shell would: quotes group words, a
+// backslash escapes the next character. Splitting on whitespace instead turns
+// `--append-system-prompt "Stay in this repo"` into five arguments, and a path
+// like "/tmp/My Project" into two — silently, at revival time.
+export function splitArgString(text) {
+  const out = [];
+  let current = '';
+  let quote = null;
+  let open = false;      // distinguishes a deliberate empty argument ('') from a gap
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) { quote = null; continue; }
+      // Only double quotes honour escapes, as in sh.
+      if (quote === '"' && ch === '\\' && i + 1 < text.length) { current += text[i += 1]; continue; }
+      current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; open = true; continue; }
+    if (ch === '\\' && i + 1 < text.length) { current += text[i += 1]; open = true; continue; }
+    if (/\s/.test(ch)) {
+      if (open || current) { out.push(current); current = ''; open = false; }
+      continue;
+    }
+    current += ch;
+    open = true;
+  }
+  if (open || current) out.push(current);
+  return out;
+}
+
+// Extra argv for launches unsnooze performs itself. Accepts either the array
+// form in config.json — the honest one, no parsing involved — or a string,
+// which is all an environment variable can carry.
+export function resolveResumeExtraArgs(agentId) {
+  return resolveExtraArgs('resumeExtraArgs', agentId);
+}
+
+// The user's own launches, via the shell wrapper.
+export function resolveLaunchExtraArgs(agentId) {
+  return resolveExtraArgs('launchExtraArgs', agentId);
+}
+
+function resolveExtraArgs(setting, agentId) {
+  const key = `${setting}.${agentId}`;
+  if (!agentId || !KNOWN_KEYS.includes(key)) return [];
+  const value = getConfig(key);
+  if (Array.isArray(value)) return value.filter(arg => typeof arg === 'string' && arg !== '');
+  return typeof value === 'string' && value.trim() ? splitArgString(value) : [];
+}
+
+export function setConfigValue(key, rawValue) {
+  if (!KNOWN_KEYS.includes(key)) throw new Error(`unsnooze: unknown setting "${key}" (known: ${KNOWN_KEYS.join(', ')})`);
+  const def = dig(DEFAULTS, key);
+  let value = rawValue;
+  if (typeof def === 'boolean') {
+    const b = typeof rawValue === 'boolean' ? rawValue : parseBool(String(rawValue));
+    if (b === null) throw new Error(`unsnooze: "${key}" needs a boolean (on/off, true/false)`);
+    value = b;
+  } else if (typeof def === 'number') {
+    const n = parseInt(String(rawValue), 10);
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`unsnooze: "${key}" needs a positive integer`);
+    value = n;
+  } else {
+    value = String(rawValue);
+    if (key.startsWith('primeAt.')) {
+      // Inline, not imported from prime.js: that module pulls in usage.js,
+      // and settings.js must stay a cheap leaf for the hook path.
+      const m = value.trim().match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+      const auto = /^auto$/i.test(value.trim());
+      if (!m && !auto && !/^(off)?$/i.test(value.trim())) throw new Error(`unsnooze: "${key}" needs auto, a local time like 06:00, or off`);
+      value = auto ? 'auto' : m ? `${m[1].padStart(2, '0')}:${m[2]}` : '';
+    }
+    if (ENUMS[key] && !ENUMS[key].includes(value)) {
+      throw new Error(`unsnooze: "${key}" must be one of: ${ENUMS[key].join(', ')}`);
+    }
+  }
+  const config = readFileConfig();
+  const parts = key.split('.');
+  let cursor = config;
+  for (const part of parts.slice(0, -1)) {
+    if (typeof cursor[part] !== 'object' || cursor[part] === null) cursor[part] = {};
+    cursor = cursor[part];
+  }
+  cursor[parts[parts.length - 1]] = value;
+  writeConfig(config);
+  return value;
+}
+
+export function writeConfig(config) {
+  const path = CONFIG_FILE();
+  ensureStateDir(dirname(path));
+  // Owner-only: ntfyToken is a Bearer credential, and config.json was
+  // world-readable before 1.17.0.
+  writePrivateFile(path, join(dirname(path), `.config.tmp.${process.pid}`),
+    JSON.stringify(config, null, 2) + '\n');
+}
+
+export function configFileExists() {
+  try { readFileSync(CONFIG_FILE()); return true; } catch { return false; }
+}
+
+export function listConfig() {
+  const out = {};
+  for (const key of KNOWN_KEYS) out[key] = getConfig(key);
+  return out;
+}

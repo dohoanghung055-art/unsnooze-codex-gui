@@ -1,0 +1,235 @@
+// Default `unsnooze _run <agent> [args...]` path: run the agent CLI under watch.
+//   - outside a multiplexer: re-exec through its launchWrapped operation
+//   - inside one: spawn a detached per-pane monitor, then run the CLI,
+//     propagating its exit code
+//   - -p/--print, -h/--help, -v/-V/--version: pure pass-through, no monitor (nothing interactive to scrape)
+
+import { spawn, spawnSync } from 'node:child_process';
+import { getMultiplexer } from './multiplexer.js';
+import { getAgent } from './agents/index.js';
+import { getConfig, resolveLaunchExtraArgs } from './settings.js';
+import { spawnDetached, monitorSpawnArgs, ensureDaemon } from './spawn.js';
+import { makeLogger } from './logger.js';
+import { createLeaseId, processBirth, writeLease, removeLease } from './lease.js';
+import { recordOwnedSession } from './mux-sessions.js';
+import { AgentDispatchedError, SessionCreateError, attachHint } from './multiplexers/session-name.js';
+
+const log = makeLogger('launcher');
+
+export function isPassthrough(args = []) {
+  return args.some(a =>
+    a === '-p' || a === '--print'
+    || a === '-h' || a === '--help'
+    || a === '-v' || a === '-V' || a === '--version'
+  );
+}
+
+export function resolvePaneOwner(muxName, env = process.env) {
+  if (muxName === 'herdr') {
+    return (env.UNSNOOZE_MUX === 'herdr'
+      ? env.UNSNOOZE_PANE_OWNER : env.HERDR_SESSION || 'default') || null;
+  }
+  if (muxName === 'zellij') {
+    return (env.UNSNOOZE_MUX === 'zellij'
+      ? env.UNSNOOZE_PANE_OWNER : env.ZELLIJ_SESSION_NAME) || null;
+  }
+  return null;
+}
+
+// A headless revival runs this launcher detached, with no console and no
+// terminal on any stdio. On Windows the agent would then be given a console
+// window of its own — an empty window popping up on the desktop at every
+// reset, which closing kills the revival. Hide it there. Whenever a terminal
+// is attached nothing changes: the agent, a console program, shares the
+// launcher's console, and windowsHide only affects a console Windows creates.
+export function hideAgentWindow(streams = process) {
+  return !(streams.stdin?.isTTY || streams.stdout?.isTTY || streams.stderr?.isTTY);
+}
+
+function runUnwatched(agent, args, reason) {
+  if (reason) process.stderr.write(`unsnooze: ${reason}\n`);
+  return runPassthrough(agent, args);
+}
+
+// spawnSync reports a binary it could not start as r.error with no status;
+// `r.status ?? 1` alone turned `spawn codex ENOENT` into a silent exit 1.
+function runPassthrough(agent, args) {
+  const r = spawnSync(agent.bin, args, { stdio: 'inherit', env: { ...process.env, UNSNOOZE_ACTIVE: '1' } });
+  if (r.error) return launchFailed(agent, r.error);
+  return r.status ?? 1;
+}
+
+export function runLauncher(args, agentId = 'claude', {
+  processBirthFn = processBirth, ensureDaemonFn = ensureDaemon,
+} = {}) {
+  const agent = getAgent(agentId);
+
+  // Recursion / nested-launch guard: inside an unsnooze-managed session, a
+  // plain `claude`/`codex`/`unsnooze` call goes straight through. Same for an
+  // agent the user disabled in settings — run it, don't watch it.
+  //
+  // Non-interactive / informational invocations (-p/--print, -h/--help, -v/--version)
+  // also bypass multiplexer wrapping and monitoring — running a new tmux session
+  // or spawning a watcher for `claude --help` flashes the screen and slows down
+  // simple queries.
+  if (process.env.UNSNOOZE_ACTIVE === '1' || isPassthrough(args) || !getConfig(`agents.${agent.id}`)) {
+    return runPassthrough(agent, args);
+  }
+
+  // Flags the user wants on every session they start (claude's --autocompact
+  // is the motivating one — see settings.launchExtraArgs). Ahead of the user's
+  // own args because a bare `claude "do the thing"` puts a positional prompt
+  // there, and options have to come before it. Deliberately not applied on the
+  // pass-through above: that branch is a nested call inside an already-wrapped
+  // session, where the outer launch has applied them once already.
+  args = [...resolveLaunchExtraArgs(agent.id), ...args];
+
+  const mux = getMultiplexer();
+  if (!mux.inside()) {
+    if (!mux.available()) {
+      // Degrade gracefully: run the CLI unwatched rather than dying.
+      process.stderr.write(`unsnooze: ${mux.name} not found — running without limit-watch.\n`);
+      if (process.platform === 'win32') {
+        process.stderr.write('unsnooze: native Windows is not supported; run inside WSL.\n');
+      } else {
+        process.stderr.write(`unsnooze: install ${mux.name} to enable auto-resume.\n`);
+      }
+      return runUnwatched(agent, args);
+    }
+    log(`not in ${mux.name} — wrapping into a managed session`);
+    try {
+      // A returned status is the agent's (or session's) exit — never re-run.
+      return mux.launchWrapped({
+        file: process.execPath,
+        args: [process.argv[1], '_run', agent.id, ...args],
+        env: process.env,
+        // Written before the session is used, not after: a launch that dies
+        // halfway still leaves the evidence reap needs to clean up after it.
+        // Without this, reap has no proof of ownership and (correctly) refuses
+        // to delete anything.
+        onSessionCreated: name => recordOwnedSession({ mux: mux.name, name }),
+      });
+    } catch (err) {
+      // The agent may already be running inside the session: the multiplexer
+      // took the command that starts it and something after that failed. The
+      // unwatched fallback below would then start a SECOND agent — two live
+      // sessions, two sets of edits — from one `unsnooze claude`. Tell the user
+      // how to reach the one that exists instead.
+      if (err instanceof AgentDispatchedError) {
+        process.stderr.write(`unsnooze: ${err.message}\n`);
+        const hint = attachHint(err.mux || mux.name, err.session);
+        if (hint) process.stderr.write(`unsnooze: reattach with: ${hint}\n`);
+        process.stderr.write(`unsnooze: not starting ${agent.id} again — it may already be running.\n`);
+        log(`launchWrapped failed after dispatch: ${err.stack || err}`);
+        return 1;
+      }
+      // Session creation failed before anything could start (binary spawn,
+      // duplicate name, unexpected throw). Never brick the user's
+      // `claude`/`codex` — fall back unwatched.
+      const msg = err instanceof SessionCreateError
+        ? `${err.message} — running without limit-watch.`
+        : `failed to wrap into ${mux.name} (${err.message}) — running without limit-watch.`;
+      log(`launchWrapped failed: ${err.stack || err}`);
+      return runUnwatched(agent, args, msg);
+    }
+  }
+
+  // Nothing keeps the daemon running on native Windows (see ensureDaemon), so
+  // every watched launch makes sure it is. Here, past the re-exec above, so a
+  // launch that wraps itself asks once, not twice. A no-op everywhere else,
+  // and until `install --daemon` has asked for the daemon.
+  ensureDaemonFn();
+
+  const rawPane = mux.currentPaneId();
+  const paneOwner = resolvePaneOwner(mux.name, process.env);
+  // A backend may know it cannot safely address the pane it is sitting in —
+  // herdr's pane ids are per-server, and an ambient custom socket can point our
+  // commands at a different server's identically-numbered pane. Watching
+  // nothing beats typing into someone else's terminal, so drop to the same
+  // no-pane path a missing pane id already takes: the agent runs normally,
+  // just unwatched, and the user is told why.
+  const addressable = typeof mux.paneAddressable !== 'function' || mux.paneAddressable();
+  if (rawPane && !addressable) {
+    const why = typeof mux.addressabilityReason === 'function'
+      ? mux.addressabilityReason() : `${mux.name} pane ${rawPane} is not safely addressable`;
+    process.stderr.write(`unsnooze: ${why} — running ${agent.id} without limit-watch.\n`);
+    log(`pane ${rawPane} not addressable: ${why}`);
+  }
+  const pane = addressable ? rawPane : null;
+  const leaseId = process.env.UNSNOOZE_LEASE_ID || createLeaseId();
+  if (pane) {
+    // Stamp our own pane (best-effort, tmux only): the identity every later
+    // close/inject decision verifies against — pane ids get recycled.
+    // Bind to the pane's session first: herdr addresses panes through
+    // `--session`, so an unbound driver cannot write the stamp at all. tmux
+    // ignores the binding.
+    const owner = typeof mux.bind === 'function' ? mux.bind(paneOwner) : mux;
+    if (typeof owner.stampPaneOwner === 'function') {
+      Promise.resolve(owner.stampPaneOwner(pane, leaseId)).catch(() => { /* legacy tmux */ });
+    }
+    spawnDetached(
+      monitorSpawnArgs({ muxName: mux.name, paneOwner, pane, agentId: agent.id, leaseId }),
+      { UNSNOOZE_CWD: process.cwd() });
+    log(`launching ${agent.id} in ${mux.name} ${paneOwner ?? '-'}:${pane}, monitor spawned`);
+  } else if (mux.name === 'headless') {
+    // Headless has no pane, so there is no monitor to spawn — the StopFailure
+    // hook and the transcript watcher do the detecting. Say so: this is real
+    // watching, not the unwatched fallback, but it is weaker than a pane
+    // (no menu driving, no busy detection), so name the way out of it.
+    process.stderr.write('unsnooze: no multiplexer found — watching '
+      + `${agent.id} headless (hook + transcript).\n`);
+    process.stderr.write('unsnooze: install tmux'
+      + `${process.platform === 'win32' ? ' under WSL' : ''} for pane-level watching.\n`);
+    log(`headless: launching ${agent.id} with no pane; detection via hook + transcript`);
+  } else {
+    log(`inside ${mux.name} but pane id unset — launching ${agent.id} without monitor`);
+  }
+
+  const childEnv = {
+    ...process.env, UNSNOOZE_ACTIVE: '1', UNSNOOZE_MUX: mux.name,
+    UNSNOOZE_PANE: pane || '', UNSNOOZE_PANE_OWNER: paneOwner || '',
+    UNSNOOZE_LEASE_ID: leaseId,
+  };
+  // The bin can be a path we resolved ourselves (a Windows .cmd shim, say).
+  // Node ≥ 20.12 refuses to spawn .bat/.cmd without a shell, and depending on
+  // the version that is a synchronous throw rather than an 'error' event —
+  // either way it has to come out as the same "failed to launch" line, with
+  // the reason, never as a crash with no exit code for the resumer to read.
+  let child;
+  try {
+    child = spawn(agent.bin, args, { stdio: 'inherit', env: childEnv, windowsHide: hideAgentWindow() });
+  } catch (err) {
+    return launchFailed(agent, err);
+  }
+  const lease = pane && child.pid ? {
+    leaseId, mux: mux.name, paneOwner, pane, agent: agent.id,
+    pid: child.pid, pidBirth: processBirthFn(child.pid),
+  } : null;
+  // Write it even when the birth timestamp is unavailable. processBirth only
+  // reads /proc on linux and `ps` on darwin, so it is null on Windows and on
+  // any ps failure — and gating the write on it meant a perfectly healthy
+  // agent there got no lease at all. The monitor reads presence to know its
+  // agent is alive; ownership checks stay exactly as strict, because
+  // leaseMatches() still refuses to match a lease with a null birth.
+  if (lease) writeLease(lease);
+  const cleanup = () => { if (lease) removeLease(lease, leaseId); };
+  return new Promise(resolve => {
+    child.on('exit', code => { cleanup(); resolve(code ?? 1); });
+    child.on('error', err => {
+      cleanup();
+      resolve(launchFailed(agent, err));
+    });
+  });
+}
+
+// One place for the message, because the resumer reads it back out of the
+// headless log when a revival dies (#25). 127 like a shell's "command not
+// found"; the hint names the one misconfiguration that produces EINVAL here.
+function launchFailed(agent, err) {
+  process.stderr.write(`unsnooze: failed to launch ${agent.bin}: ${err.message}\n`);
+  if (/\.(cmd|bat)$/i.test(String(agent.bin))) {
+    process.stderr.write(`unsnooze: ${agent.bin} is a .cmd/.bat shim, which cannot be launched directly — `
+      + `point UNSNOOZE_${agent.id.toUpperCase()}_BIN at the .exe\n`);
+  }
+  return 127;
+}

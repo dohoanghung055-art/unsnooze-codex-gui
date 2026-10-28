@@ -1,0 +1,10 @@
+node_modules/
+.cocoindex_code/
+.unsnooze/
+.codex/
+.env
+.env.*
+*.log
+*.tgz
+*.zip
+.DS_Store
