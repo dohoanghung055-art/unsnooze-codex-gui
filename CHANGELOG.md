@@ -2,6 +2,8 @@
 
 ## Unreleased — Henry Codex GUI fork
 
+- Withdraw automatic Goal bridge activation after a missing code-mode-host runtime failure. `-Enable` now rejects without modifying the Desktop launcher; use native Goal Resume. Ordinary Desktop wakeups remain available. A real Windows installer regression verifies no launcher mutation or installation creation.
+
 - Add an opt-in Windows stdio owner bridge for automatic resumption of `usageLimited` Goals after a confirmed quota stop. Preserve manual pause, budgets, accounting and the Desktop writer.
 - Claim activation before delivery; verify Goal status and a new turn without sending a second wake prompt. Serialize Desktop Goal edits so a concurrent manual Pause wins.
 - Add a reproducible launcher installer and setup/rollback documentation. Existing release assets and running installations remain unchanged; real quota-reset activation remains unverified.

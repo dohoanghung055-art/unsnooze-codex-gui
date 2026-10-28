@@ -1,6 +1,6 @@
 # Goal continuation after a quota reset
 
-Investigated on 2026-10-28. This document records the original investigation. A subsequent opt-in owner bridge is now implemented on `main`; see [installation, behavior and verification limits](goal-resume.md). Waking a chat and restoring Goal continuation are different operations.
+Investigated on 2026-10-28. This document records the original investigation. A subsequent owner bridge was implemented, but activation was withdrawn after a missing Desktop runtime companion failure; see [current status, rollback and verification limits](goal-resume.md). Waking a chat and restoring Goal continuation are different operations.
 
 ## What users can do now
 

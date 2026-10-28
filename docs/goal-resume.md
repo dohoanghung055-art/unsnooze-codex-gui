@@ -1,5 +1,7 @@
 # Automatic Goal resume (experimental, opt-in)
 
+**Activation withdrawn on 2026-10-28.** A Desktop session failed to spawn `codex-code-mode-host.exe` after the custom launcher rollout. The ordinary launcher subsequently restored working command execution. The full cause has not been reproduced in isolation, but the bridge's runtime discovery checked only `codex.exe`, and the installer's `--version` smoke test could not detect missing runtime companions. Automatic `-Enable` now fails before compilation, file creation or environment changes. Do not set `CODEX_CLI_PATH` manually to bypass this restriction. Use the native Goal Resume control.
+
 Available in source on `main`. The earlier `20261028` release assets do **not** include this feature. This is a separate owner bridge, not an upgrade to the ordinary wake prompt.
 
 ## Behavior
@@ -14,7 +16,7 @@ The app-tools endpoint currently used for Desktop wakeups has no Goal-control to
 
 Desktop Goal edits are serialized with automatic activation. A Pause observed before activation cancels it; a Pause arriving after the activation write is forwarded afterwards, so the user's final state wins. Unsupported external writers editing the same Goal outside this connection are not protected by a server-side compare-and-set: the upstream API does not expose one. Do not run a second writer on that thread.
 
-## Install from source on Windows
+## Ordinary Unsnooze installation on Windows
 
 Use Node.js 22+ and Windows PowerShell 5.1 (`powershell.exe`). Keep this checkout at a stable path:
 
@@ -23,12 +25,11 @@ git clone https://github.com/dohoanghung055-art/unsnooze-codex-gui.git
 Set-Location .\unsnooze-codex-gui
 npm.cmd ci
 npm.cmd install --global .
-powershell.exe -NoProfile -File .\scripts\install-goal-bridge.ps1 -Enable
 ```
 
-The installer compiles a small local executable with Windows' built-in .NET compiler, checks `--version`, and sets the **user** `CODEX_CLI_PATH` override. It refuses to replace another override or an existing launcher. Nothing is downloaded by the compiler. Paths remain local and are not embedded in the repository. Existing Unsnooze configuration/state is retained by the normal npm installation.
+This installs ordinary Unsnooze without changing Desktop's launcher. The experimental installer refuses `-Enable`. Without that flag it can still build a local diagnostic executable, but this is not an activation path and a successful `--version` is not proof of a functional Desktop runtime.
 
-Finish current work, fully close Desktop, then reopen it. Existing Desktop processes keep their old backend; the installer does not interrupt them. If Windows retains the old environment, sign out/in once. Restart the Unsnooze daemon after installing the updated source. The existing SessionStart hook can ensure it starts, after its ordinary trust review.
+Restart the Unsnooze daemon after updating its source. The existing SessionStart hook can ensure it starts, after its ordinary trust review. Do not change or restart Desktop solely to activate the withdrawn Goal bridge.
 
 **Compatibility:** tested against bundled Codex `0.164.0-alpha.11.1`. This uses Desktop's custom CLI override, an experimental integration boundary that can change. Desktop may handle its bundled sandbox service differently for a custom executable; verify your existing permission profile in the reopened app before unattended use. The adapter itself forwards launch arguments and thread settings and does not lower permissions or approvals. No automatic installer run or restart is performed merely by updating Unsnooze.
 

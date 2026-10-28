@@ -1,5 +1,8 @@
 param([switch]$Enable)
 $ErrorActionPreference = 'Stop'
+if ($Enable) {
+  throw 'Automatic Desktop Goal bridge activation is disabled after a missing code-mode-host runtime failure. CODEX_CLI_PATH was not changed. Use Codex Goal Resume instead.'
+}
 if ([Environment]::OSVersion.Platform -ne 'Win32NT') { throw 'Windows is required.' }
 # Compile with Windows PowerShell's Framework compiler (no SDK/download needed).
 if ($PSVersionTable.PSEdition -eq 'Core') { throw 'Run this installer with powershell.exe (Windows PowerShell).' }
@@ -42,12 +45,5 @@ public static class UnsnoozeLauncher {
 Add-Type -TypeDefinition $source -OutputAssembly $launcherPath -OutputType ConsoleApplication
 & $launcherPath --version
 if ($LASTEXITCODE -ne 0) { throw 'Launcher verification failed; CODEX_CLI_PATH was not changed.' }
-if ($Enable) {
-  @{ previousUserOverride = $existingOverride; installedLauncher = $launcherPath } |
-    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $installFolder 'installation.json') -Encoding UTF8
-  [Environment]::SetEnvironmentVariable('CODEX_CLI_PATH', $launcherPath, 'User')
-  Write-Output 'Enabled for newly started apps. Finish active work, then fully close and reopen Codex Desktop. If Windows keeps the old environment, sign out/in.'
-} else {
-  Write-Output 'Launcher verified. To enable for one Desktop launch, set CODEX_CLI_PATH to the launcher path in that launching process.'
-}
+Write-Output 'Diagnostic launcher built only. Desktop activation is disabled; --version does not validate the complete Desktop runtime.'
 Write-Output $launcherPath

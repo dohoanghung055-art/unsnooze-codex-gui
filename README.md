@@ -92,9 +92,9 @@ Release `v1.20.1-henry-codex-gui.20261028` đã tải lên trước khi thêm ho
 
 ## Goal bị dừng sau rate limit
 
-Nhánh `main` đã có **cầu nối Goal thử nghiệm, cần bật riêng**. Sau khi quota reset, nó chỉ kích hoạt Goal `usageLimited`, giữ nguyên mục tiêu, ngân sách và lượng đã dùng; không kích hoạt Goal pause thủ công, blocked, complete hoặc hết ngân sách. Nó kiểm tra cả Goal và lượt chạy mới, không gửi thêm prompt trùng.
+**Đã tạm khóa kích hoạt cầu nối Goal thử nghiệm** sau lỗi runtime thiếu `codex-code-mode-host.exe`. Unsnooze vẫn tự resume chat qua Desktop như trước; Goal dùng nút **Resume** trong Codex hoặc `/goal resume`.
 
-Cổng app-tools hiện chưa có lệnh Goal, nên cầu nối dùng chính tiến trình Codex mà Desktop mở. **Cần cài từ source và mở lại Desktop**; chỉ cập nhật repo sẽ chưa bật tính năng cho phiên đang chạy. Xem [hướng dẫn cài, hoàn tác và giới hạn kiểm chứng](docs/goal-resume.md). Release `20261028` cũ không chứa tính năng này. Khi chưa bật cầu nối, dùng **Resume** ở dòng Goal hoặc `/goal resume` như trước.
+Cổng app-tools hiện chưa có lệnh Goal. Việc thay launcher Desktop chưa được kiểm chứng đủ, nên trình cài hiện từ chối `-Enable` và không đổi `CODEX_CLI_PATH`. Nếu đã bật bản thử nghiệm, xem [hướng dẫn hoàn tác và giới hạn kiểm chứng](docs/goal-resume.md). Không bật lại bằng cách đổi biến môi trường thủ công.
 
 ## Có gì trong ZIP trên Releases?
 
