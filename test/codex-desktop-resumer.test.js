@@ -119,3 +119,71 @@ test('new Desktop turn hitting the limit is retryable and never falsely verified
   assert.equal(stored.attempts, 1);
   assert.ok(stored.resetAt > Date.now());
 });
+
+function goalFor(rec, status = 'usageLimited') {
+  return { threadId: rec.sessionId, objective: 'Complete the fixture', status,
+    createdAt: 1, updatedAt: 2, tokenBudget: 1000, tokensUsed: 100, timeUsedSeconds: 10 };
+}
+
+test('Goal activation is claimed before delivery, sends no prompt, and verifies state plus execution', options, async () => {
+  const rec = seed(); let started = false, activations = 0;
+  const desktop = {
+    read: async () => started ? running(rec) : stopped(rec),
+    readGoal: async () => ({ available: true, goal: goalFor(rec, started ? 'active' : 'usageLimited'), revision: 0 }),
+    resumeGoal: async () => {
+      const stored = readState().sessions[rec.key];
+      assert.equal(stored.status, 'resuming'); assert.equal(stored.desktopWake.mode, 'goal');
+      assert.equal(JSON.stringify(stored.desktopWake).includes('Complete the fixture'), false);
+      activations++; started = true;
+    }, send: () => assert.fail('Goal activation must not also send a prompt'),
+  };
+  assert.equal(await dispatchOne(rec, { mux, desktop }), 'injected');
+  assert.equal(await verifyOne(rec.key, { desktop }), 'resumed');
+  assert.equal(activations, 1);
+});
+
+test('Goal active without a new turn, or a new turn without Goal evidence, is not verified', options, async () => {
+  for (const newTurn of [false, true]) {
+    const rec = seed(); let started = false;
+    const desktop = {
+      read: async () => newTurn && started ? running(rec) : stopped(rec),
+      readGoal: async () => started && newTurn ? { available: false } :
+        { available: true, goal: goalFor(rec, started ? 'active' : 'usageLimited') },
+      resumeGoal: async () => { started = true; }, send: () => assert.fail('duplicate prompt'),
+    };
+    assert.equal(await dispatchOne(rec, { mux, desktop }), 'injected');
+    assert.equal(await verifyOne(rec.key, { desktop }), 'pending');
+  }
+});
+
+test('manual Goal states and exhausted budget hold the entire wake', options, async () => {
+  for (const status of ['paused', 'blocked', 'complete', 'budgetLimited', 'usageLimited']) {
+    const rec = seed(); const goal = goalFor(rec, status);
+    if (status === 'usageLimited') goal.tokenBudget = goal.tokensUsed;
+    const desktop = { read: async () => stopped(rec), readGoal: async () => ({ available: true, goal }),
+      resumeGoal: () => assert.fail('ineligible Goal activated'), send: () => assert.fail('ineligible Goal woken') };
+    assert.equal(await dispatchOne(rec, { mux, desktop }), 'held');
+  }
+});
+
+test('uncertain Goal activation survives restart as verification-only', options, async () => {
+  const rec = seed(); let writes = 0;
+  const desktop = { read: async () => stopped(rec),
+    readGoal: async () => ({ available: true, goal: goalFor(rec) }),
+    resumeGoal: async () => { writes++; throw Error('connection lost'); }, send: () => assert.fail('duplicate prompt') };
+  await dispatchOne(rec, { mux, desktop });
+  assert.equal(await dispatchOne(readState().sessions[rec.key], { mux, desktop }), 'stale');
+  assert.equal(await verifyOne(rec.key, { desktop }), 'pending');
+  assert.equal(writes, 1);
+});
+
+test('missing optional adapter preserves ordinary Desktop wake, ownership errors wait', options, async () => {
+  for (const unavailable of [false, true]) {
+    const rec = seed(); let sends = 0;
+    const desktop = { read: async () => stopped(rec),
+      readGoal: async () => { if (unavailable) throw Error('owner unavailable'); return { available: false }; },
+      send: async () => { sends++; } };
+    assert.equal(await dispatchOne(rec, { mux, desktop }), unavailable ? 'probe' : 'injected');
+    assert.equal(sends, unavailable ? 0 : 1);
+  }
+});

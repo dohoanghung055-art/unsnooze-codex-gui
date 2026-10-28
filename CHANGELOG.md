@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — Henry Codex GUI fork
+
+- Add an opt-in Windows stdio owner bridge for automatic resumption of `usageLimited` Goals after a confirmed quota stop. Preserve manual pause, budgets, accounting and the Desktop writer.
+- Claim activation before delivery; verify Goal status and a new turn without sending a second wake prompt. Serialize Desktop Goal edits so a concurrent manual Pause wins.
+- Add a reproducible launcher installer and setup/rollback documentation. Existing release assets and running installations remain unchanged; real quota-reset activation remains unverified.
+
 ## 1.20.1 — 2026-10-08
 
 `unsnooze help` lists the usage flags in the right place again, and the docs'

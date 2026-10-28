@@ -92,9 +92,9 @@ Release `v1.20.1-henry-codex-gui.20261028` đã tải lên trước khi thêm ho
 
 ## Goal bị dừng sau rate limit
 
-Resume một lượt chat không đủ để chứng minh vòng tự tiếp tục của Goal đã được bật lại. Bản này **chưa chủ động resume Goal**. Hiện hãy dùng **Resume** ở dòng Goal trong app hoặc `/goal resume` trong Codex CLI.
+Nhánh `main` đã có **cầu nối Goal thử nghiệm, cần bật riêng**. Sau khi quota reset, nó chỉ kích hoạt Goal `usageLimited`, giữ nguyên mục tiêu, ngân sách và lượng đã dùng; không kích hoạt Goal pause thủ công, blocked, complete hoặc hết ngân sách. Nó kiểm tra cả Goal và lượt chạy mới, không gửi thêm prompt trùng.
 
-Đã xác nhận schema Codex có trạng thái `usageLimited` riêng, nhưng cổng app-tools đang dùng chưa cung cấp công cụ điều khiển Goal. Muốn hỗ trợ tự động đúng cách phải bổ sung đường điều khiển qua chính Desktop đang sở hữu chat, chỉ tiếp tục Goal bị quota chặn và giữ nguyên pause thủ công/ngân sách. Xem [kết quả điều tra và giới hạn bằng chứng](docs/goal-resume-investigation.md).
+Cổng app-tools hiện chưa có lệnh Goal, nên cầu nối dùng chính tiến trình Codex mà Desktop mở. **Cần cài từ source và mở lại Desktop**; chỉ cập nhật repo sẽ chưa bật tính năng cho phiên đang chạy. Xem [hướng dẫn cài, hoàn tác và giới hạn kiểm chứng](docs/goal-resume.md). Release `20261028` cũ không chứa tính năng này. Khi chưa bật cầu nối, dùng **Resume** ở dòng Goal hoặc `/goal resume` như trước.
 
 ## Có gì trong ZIP trên Releases?
 

@@ -33,7 +33,11 @@ import { makeLogger } from './logger.js';
 import { createLeaseId, leaseMatches, paneOwnedByRecord } from './lease.js';
 import { autoReapIfEnabled, attachHint } from './reap.js';
 import { tickUsageWarnings } from './usage.js';
-import { desktopClient, desktopDecision, isCodexDesktop } from './codex-desktop.js';
+import { desktopClient as nativeDesktopClient, desktopDecision, isCodexDesktop } from './codex-desktop.js';
+import { createGoalClient, resumableGoal, goalIdentity } from './codex-goals.js';
+
+const goals = createGoalClient();
+const desktopClient = { ...nativeDesktopClient, readGoal: goals.read, resumeGoal: goals.resume };
 
 const log = makeLogger('resumer');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -784,13 +788,31 @@ async function dispatchDesktop(rec, { desktop, resumeMessage, onDelivered }) {
     }, { expect: ['stopped'] });
     return 'held';
   }
-  const wake = { callId: createLeaseId(), turnId: snapshot.turn.id, sentAt: Date.now() };
+  let inspection;
+  try {
+    inspection = await desktop.readGoal?.(rec);
+  } catch (error) {
+    transitionStopEpisode(rec, 'stopped', { lastError: `waiting for Goal owner: ${error.message}` }, { expect: ['stopped'] });
+    return 'probe';
+  }
+  const goal = inspection?.available ? inspection.goal : null;
+  const activateGoal = goal?.status === 'usageLimited';
+  if (goal && (activateGoal ? !resumableGoal(goal, rec.sessionId) : goal.status !== 'active')) {
+    transitionStopEpisode(rec, 'failed', {
+      lastError: 'Goal is paused, blocked, complete, budget-limited, or invalid; automatic wake held',
+    }, { expect: ['stopped'] });
+    return 'held';
+  }
+  const wake = { callId: createLeaseId(), turnId: snapshot.turn.id, sentAt: Date.now(),
+    ...(activateGoal ? { mode: 'goal', goalIdentity: goalIdentity(goal),
+      tokensUsed: goal.tokensUsed, timeUsedSeconds: goal.timeUsedSeconds } : {}) };
   // Persist the claim BEFORE the pipe write. A crash/lost acknowledgement must
   // enter verification on restart, never send a second wake for this episode.
   if (!claimStopForResume(rec, null, { desktopWake: wake })) return 'stale';
   try {
-    await desktop.send(rec, resumeMessage, wake);
-    log(`${rec.key}: wake acknowledged by Codex Desktop; verifying a new turn`);
+    if (activateGoal) await desktop.resumeGoal(rec, { ...inspection, stoppedTurnId: snapshot.turn.id });
+    else await desktop.send(rec, resumeMessage, wake);
+    log(`${rec.key}: ${activateGoal ? 'Goal activation' : 'wake'} acknowledged by Codex Desktop; verifying a new turn`);
     onDelivered();
   } catch (error) {
     transitionStopEpisode(rec, 'resuming', {
@@ -805,6 +827,24 @@ async function verifyDesktop(rec, desktop) {
   try { snapshot = await desktop.read(rec); }
   catch { /* a closed/restarting Desktop is not delivery evidence */ }
   const wake = rec.desktopWake;
+  if (wake.mode === 'goal') {
+    let inspection;
+    try { inspection = await desktop.readGoal?.(rec); } catch { /* verify only */ }
+    const goal = inspection?.available ? inspection.goal : null;
+    if (goal && (goalIdentity(goal) !== wake.goalIdentity
+      || ['paused', 'blocked', 'budgetLimited'].includes(goal.status))) {
+      transitionStopEpisode(rec, 'failed', { lastError: 'Goal changed or was paused; automatic continuation held' }, { expect: ['resuming'] });
+      return 'held';
+    }
+    // A new turn alone does not prove the Goal continuation loop was restored.
+    if (!goal || !['active', 'complete', 'usageLimited'].includes(goal.status)
+      || goal.tokensUsed < wake.tokensUsed || goal.timeUsedSeconds < wake.timeUsedSeconds
+      || (goal.status === 'usageLimited' && desktopDecision(snapshot, stopEpisodeAt(rec)) !== 'wake')) {
+      if (Date.now() - wake.sentAt < 120_000) return 'pending';
+      transitionStopEpisode(rec, 'failed', { lastError: 'Goal activation unverified; held without resending' }, { expect: ['resuming'] });
+      return 'held';
+    }
+  }
   if (snapshot?.turn?.id && snapshot.turn.id !== wake.turnId) {
     const decision = desktopDecision(snapshot, stopEpisodeAt(rec));
     if (decision === 'wake') {

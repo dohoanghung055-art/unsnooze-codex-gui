@@ -1,6 +1,6 @@
 # Goal continuation after a quota reset
 
-Investigated on 2026-10-28. **This fork does not yet explicitly resume a usage-limited Goal.** Waking a chat and restoring Goal continuation are different operations.
+Investigated on 2026-10-28. This document records the original investigation. A subsequent opt-in owner bridge is now implemented on `main`; see [installation, behavior and verification limits](goal-resume.md). Waking a chat and restoring Goal continuation are different operations.
 
 ## What users can do now
 
@@ -30,4 +30,4 @@ Once that owner-backed capability is available, a narrow implementation should:
 - Avoid sending the normal wake prompt as a second action if activating the Goal already starts an idle turn.
 - Treat uncertain outcomes as verification-only, rather than retrying blindly.
 
-No automatic Goal-resume feature was enabled or claimed verified by this investigation. Use the app's Resume control until that missing owner-backed capability is implemented and tested.
+No automatic Goal-resume feature was enabled or claimed verified by the original investigation. The subsequent implementation is opt-in and has not been verified against a real quota reset; use the app's Resume control until the bridge has been installed and activated.
