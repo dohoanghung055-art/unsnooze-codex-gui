@@ -2,6 +2,8 @@
 
 ## Unreleased — Henry Codex GUI fork
 
+- Reproduce the incomplete-runtime false positive with the real CLI. Add companion-file validation and a local code-mode host protocol readiness probe for diagnostic bridge builds and launches. Readiness explicitly leaves Desktop compatibility unverified; activation remains disabled.
+
 - Withdraw automatic Goal bridge activation after a missing code-mode-host runtime failure. `-Enable` now rejects without modifying the Desktop launcher; use native Goal Resume. Ordinary Desktop wakeups remain available. A real Windows installer regression verifies no launcher mutation or installation creation.
 
 - Add an opt-in Windows stdio owner bridge for automatic resumption of `usageLimited` Goals after a confirmed quota stop. Preserve manual pause, budgets, accounting and the Desktop writer.

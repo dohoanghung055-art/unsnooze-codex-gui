@@ -96,6 +96,8 @@ Release `v1.20.1-henry-codex-gui.20261028` đã tải lên trước khi thêm ho
 
 Cổng app-tools hiện chưa có lệnh Goal. Việc thay launcher Desktop chưa được kiểm chứng đủ, nên trình cài hiện từ chối `-Enable` và không đổi `CODEX_CLI_PATH`. Nếu đã bật bản thử nghiệm, xem [hướng dẫn hoàn tác và giới hạn kiểm chứng](docs/goal-resume.md). Không bật lại bằng cách đổi biến môi trường thủ công.
 
+Đã tái hiện và sửa lỗ hổng kiểm tra runtime: `--version` có thể đạt dù thiếu helper. Kiểm tra mới yêu cầu đủ helper và bắt tay với code-mode host thật; cầu nối vẫn chưa được phép kích hoạt. Xem [bằng chứng và phần chưa xác nhận](docs/goal-runtime-investigation.md).
+
 ## Có gì trong ZIP trên Releases?
 
 - `README.md`: hướng dẫn này.

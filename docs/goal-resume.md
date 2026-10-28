@@ -2,6 +2,8 @@
 
 **Activation withdrawn on 2026-10-28.** A Desktop session failed to spawn `codex-code-mode-host.exe` after the custom launcher rollout. The ordinary launcher subsequently restored working command execution. The full cause has not been reproduced in isolation, but the bridge's runtime discovery checked only `codex.exe`, and the installer's `--version` smoke test could not detect missing runtime companions. Automatic `-Enable` now fails before compilation, file creation or environment changes. Do not set `CODEX_CLI_PATH` manually to bypass this restriction. Use the native Goal Resume control.
 
+The validation defect has since been reproduced and fixed: diagnostic builds check all companion helpers and a real local code-mode host handshake. This still does not validate Desktop lifecycle compatibility, so activation remains blocked. See [reproduction evidence and remaining limits](goal-runtime-investigation.md).
+
 Available in source on `main`. The earlier `20261028` release assets do **not** include this feature. This is a separate owner bridge, not an upgrade to the ordinary wake prompt.
 
 ## Behavior
@@ -27,7 +29,7 @@ npm.cmd ci
 npm.cmd install --global .
 ```
 
-This installs ordinary Unsnooze without changing Desktop's launcher. The experimental installer refuses `-Enable`. Without that flag it can still build a local diagnostic executable, but this is not an activation path and a successful `--version` is not proof of a functional Desktop runtime.
+This installs ordinary Unsnooze without changing Desktop's launcher. The experimental installer refuses `-Enable`. Without that flag it can still build a local diagnostic executable after the runtime preflight, but this is not an activation path. Use `node .\scripts\codex-goal-bridge.mjs --check-runtime` to inspect local host readiness; a successful result still reports Desktop compatibility as unverified.
 
 Restart the Unsnooze daemon after updating its source. The existing SessionStart hook can ensure it starts, after its ordinary trust review. Do not change or restart Desktop solely to activate the withdrawn Goal bridge.
 

@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { windowsBundledCodex } from '../src/agents/codex.js';
 import { createOwnerProxy } from '../src/goal-owner-proxy.js';
 import { GOAL_PIPE_PREFIX } from '../src/codex-goals.js';
+import { probeGoalRuntime } from '../src/goal-runtime.js';
 
 const executable = windowsBundledCodex();
 if (!executable || process.platform !== 'win32') {
@@ -13,9 +14,21 @@ if (!executable || process.platform !== 'win32') {
   process.exit(1);
 }
 const args = process.argv.slice(2);
+const intercept = args.includes('app-server') && !args.some(arg => ['generate-json-schema', 'generate-ts', '--help'].includes(arg));
+if (args.includes('--check-runtime') || intercept) {
+  try {
+    const health = probeGoalRuntime(executable);
+    if (args.includes('--check-runtime')) {
+      process.stdout.write(JSON.stringify(health) + '\n');
+      process.exit(0);
+    }
+  } catch (error) {
+    process.stderr.write(error.message + '\n');
+    process.exit(1);
+  }
+}
 const env = { ...process.env };
 delete env.CODEX_CLI_PATH;
-const intercept = args.includes('app-server') && !args.some(arg => ['generate-json-schema', 'generate-ts', '--help'].includes(arg));
 const child = spawn(executable, args, { env, windowsHide: true,
   stdio: intercept ? ['pipe', 'pipe', 'inherit'] : 'inherit' });
 child.on('error', () => { process.stderr.write('Codex backend could not start.\n'); process.exitCode = 1; });

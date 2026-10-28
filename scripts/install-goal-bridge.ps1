@@ -8,6 +8,8 @@ if ([Environment]::OSVersion.Platform -ne 'Win32NT') { throw 'Windows is require
 if ($PSVersionTable.PSEdition -eq 'Core') { throw 'Run this installer with powershell.exe (Windows PowerShell).' }
 $bridgeScript = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'codex-goal-bridge.mjs')).Path
 $nodePath = (Get-Command node.exe -ErrorAction Stop).Source
+& $nodePath $bridgeScript --check-runtime
+if ($LASTEXITCODE -ne 0) { throw 'Incomplete or unresponsive runtime; diagnostic launcher was not built.' }
 $codexHomePath = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 $installFolder = Join-Path $codexHomePath 'unsnooze-goal-bridge'
 $existingOverride = [Environment]::GetEnvironmentVariable('CODEX_CLI_PATH', 'User')
@@ -43,7 +45,7 @@ public static class UnsnoozeLauncher {
 }
 "@
 Add-Type -TypeDefinition $source -OutputAssembly $launcherPath -OutputType ConsoleApplication
-& $launcherPath --version
+& $launcherPath --check-runtime
 if ($LASTEXITCODE -ne 0) { throw 'Launcher verification failed; CODEX_CLI_PATH was not changed.' }
-Write-Output 'Diagnostic launcher built only. Desktop activation is disabled; --version does not validate the complete Desktop runtime.'
+Write-Output 'Diagnostic launcher built only. Local host readiness passed; Desktop compatibility remains unverified and activation is disabled.'
 Write-Output $launcherPath
