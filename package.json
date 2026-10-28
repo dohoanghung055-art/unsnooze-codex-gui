@@ -73,6 +73,8 @@
   "files": [
     "bin/",
     "src/",
+    "hooks/",
+    "scripts/install-session-hook.mjs",
     "README.md",
     "README-UPSTREAM.md",
     "LICENSE",

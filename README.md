@@ -66,6 +66,30 @@ Prompt không cấp thêm quyền và không bắt agent chạy vô hạn. Agent
 
 Gói có marker `unsnoozePin`; lệnh `unsnooze update` từ chối tự thay bản fork bằng upstream. Việc cài đè bằng npm vẫn có thể thay thế bản mod, nên đừng chạy `npm install -g unsnooze` hoặc cập nhật package này từ registry nếu muốn giữ bản đang chia sẻ.
 
+## Tự bật daemon khi mở session Work/Codex local
+
+Hook tuỳ chọn đã có trên nhánh `main`. Sau khi cài gói Unsnooze, clone repo rồi chạy:
+
+```powershell
+git clone https://github.com/dohoanghung055-art/unsnooze-codex-gui.git
+Set-Location .\unsnooze-codex-gui
+node .\scripts\install-session-hook.mjs
+```
+
+Nếu đã clone, chỉ cần `git pull` rồi chạy installer. Script đọc vị trí npm global trên máy nhận, sao lưu cấu hình cần thay đổi, giữ các hook khác và không đăng ký trùng khi chạy lại. Không chứa đường dẫn riêng của máy Henry.
+
+**Cần duyệt một lần:** mở Codex CLI, nhập `/hooks`, kiểm tra rồi Trust mục **Ensuring Unsnooze daemon is running**. Installer không tự cấp trust. Khi hook còn `untrusted`, nó chưa tự chạy.
+
+Hook bắt sự kiện bắt đầu/mở lại/xoá lịch sử/fork của session local. Nếu daemon đang sống thì bỏ qua; nếu chưa có và Unsnooze vẫn bật on-demand thì khởi động daemon nền, ẩn console. Áp dụng cho Work local và Codex local; không áp dụng cho cloud orchestration hoặc từng lần đổi tab.
+
+Mã hook: `hooks/unsnooze-session-start.cjs`. Có thêm 3 kiểm tra tập trung cho installer, bảo toàn cấu hình và vị trí package tuỳ chỉnh:
+
+```powershell
+node --test test/session-hook-install.test.js
+```
+
+Release `v1.20.1-henry-codex-gui.20261028` đã tải lên trước khi thêm hook; asset cũ được giữ nguyên. Cài hook từ mã nguồn `main` theo hướng dẫn trên. Các lần đóng gói tiếp theo sẽ kèm script và hook.
+
 ## Có gì trong ZIP trên Releases?
 
 - `README.md`: hướng dẫn này.
