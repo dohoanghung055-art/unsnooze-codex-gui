@@ -90,6 +90,12 @@ node --test test/session-hook-install.test.js
 
 Release `v1.20.1-henry-codex-gui.20261028` đã tải lên trước khi thêm hook; asset cũ được giữ nguyên. Cài hook từ mã nguồn `main` theo hướng dẫn trên. Các lần đóng gói tiếp theo sẽ kèm script và hook.
 
+## Goal bị dừng sau rate limit
+
+Resume một lượt chat không đủ để chứng minh vòng tự tiếp tục của Goal đã được bật lại. Bản này **chưa chủ động resume Goal**. Hiện hãy dùng **Resume** ở dòng Goal trong app hoặc `/goal resume` trong Codex CLI.
+
+Đã xác nhận schema Codex có trạng thái `usageLimited` riêng, nhưng cổng app-tools đang dùng chưa cung cấp công cụ điều khiển Goal. Muốn hỗ trợ tự động đúng cách phải bổ sung đường điều khiển qua chính Desktop đang sở hữu chat, chỉ tiếp tục Goal bị quota chặn và giữ nguyên pause thủ công/ngân sách. Xem [kết quả điều tra và giới hạn bằng chứng](docs/goal-resume-investigation.md).
+
 ## Có gì trong ZIP trên Releases?
 
 - `README.md`: hướng dẫn này.
