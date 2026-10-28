@@ -98,6 +98,8 @@ Cổng app-tools hiện chưa có lệnh Goal. Việc thay launcher Desktop chư
 
 Đã tái hiện và sửa lỗ hổng kiểm tra runtime: `--version` có thể đạt dù thiếu helper. Kiểm tra mới yêu cầu đủ helper và bắt tay với code-mode host thật; cầu nối vẫn chưa được phép kích hoạt. Xem [bằng chứng và phần chưa xác nhận](docs/goal-runtime-investigation.md).
 
+Đã kiểm tra thêm bản Desktop hiện tại: app-tools và IPC đều chưa mở lệnh Goal cho Unsnooze. Muốn hoàn tất tự resume Goal qua API cần bổ sung lệnh ở chính Desktop đang giữ chat; [đặc tả phần còn thiếu](docs/goal-owner-api-proposal.md) ghi rõ giao diện đề xuất và điều kiện kiểm chứng, không phải tính năng đã có.
+
 ## Có gì trong ZIP trên Releases?
 
 - `README.md`: hướng dẫn này.

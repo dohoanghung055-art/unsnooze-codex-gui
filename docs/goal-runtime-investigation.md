@@ -11,6 +11,8 @@ Investigated on 2026-10-28. Automatic Desktop bridge activation remains **disabl
 - A separate isolated Windows probe exercised the compiled launcher, proxy, real app-server, a read-only command and the real code-mode host handshake. It also modeled the custom-launch environment by omitting the registered-core and sandbox-package variables. It created no thread, changed no Goal, copied no credentials and changed no Desktop configuration.
 - The current native app-tools catalog was rechecked: it exposes thread reading and messaging, but no Goal-management tool.
 
+A further inspection of Desktop `26.1023.6123.0` found 55 catalog entries and no Goal method in its inter-window IPC registry either. The missing integration and the minimum proposed owner-backed contract are documented in [Goal owner API proposal](goal-owner-api-proposal.md). These are proposed tools, not commands available to Unsnooze today.
+
 ## What this does not establish
 
 The original incomplete runtime directory was no longer available for comparison. The exact event that removed or failed to provision its helper has not been reproduced. We cannot attribute it conclusively to an app update, cleanup, runtime selection or another cause.
