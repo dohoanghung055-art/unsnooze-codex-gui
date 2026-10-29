@@ -35,9 +35,16 @@ import { autoReapIfEnabled, attachHint } from './reap.js';
 import { tickUsageWarnings } from './usage.js';
 import { desktopClient as nativeDesktopClient, desktopDecision, isCodexDesktop } from './codex-desktop.js';
 import { createGoalClient, resumableGoal, goalIdentity } from './codex-goals.js';
+import { createGoalUiClient } from './goal-ui.js';
 
 const goals = createGoalClient();
-const desktopClient = { ...nativeDesktopClient, readGoal: goals.read, resumeGoal: goals.resume };
+const uiGoals = createGoalUiClient();
+const goalTransport = () => getConfig('goalUiResume') ? uiGoals : goals;
+const desktopClient = { ...nativeDesktopClient,
+  readGoal: rec => goalTransport().read(rec),
+  prepareGoal: (rec, inspection) => goalTransport().prepare?.(rec, inspection),
+  resumeGoal: (rec, inspection) => goalTransport().resume(rec, inspection),
+};
 
 const log = makeLogger('resumer');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -803,6 +810,13 @@ async function dispatchDesktop(rec, { desktop, resumeMessage, onDelivered }) {
     }, { expect: ['stopped'] });
     return 'held';
   }
+  if (activateGoal && desktop.prepareGoal) {
+    try { await desktop.prepareGoal(rec, inspection); }
+    catch (error) {
+      transitionStopEpisode(rec, 'stopped', { lastError: `waiting for Goal UI: ${error.message}` }, { expect: ['stopped'] });
+      return 'probe';
+    }
+  }
   const wake = { callId: createLeaseId(), turnId: snapshot.turn.id, sentAt: Date.now(),
     ...(activateGoal ? { mode: 'goal', goalIdentity: goalIdentity(goal),
       tokensUsed: goal.tokensUsed, timeUsedSeconds: goal.timeUsedSeconds } : {}) };
@@ -815,6 +829,12 @@ async function dispatchDesktop(rec, { desktop, resumeMessage, onDelivered }) {
     log(`${rec.key}: ${activateGoal ? 'Goal activation' : 'wake'} acknowledged by Codex Desktop; verifying a new turn`);
     onDelivered();
   } catch (error) {
+    if (activateGoal && error.notAttempted === true) {
+      transitionStopEpisode(rec, 'stopped', {
+        desktopWake: null, lastError: `waiting for Goal UI: ${error.message}`,
+      }, { expect: ['resuming'] });
+      return 'probe';
+    }
     transitionStopEpisode(rec, 'resuming', {
       lastError: `Desktop wake delivery unconfirmed: ${error.message}; will verify without resending`,
     }, { expect: ['resuming'] });

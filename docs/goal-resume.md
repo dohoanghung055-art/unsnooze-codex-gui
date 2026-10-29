@@ -1,5 +1,7 @@
 # Automatic Goal resume (experimental, opt-in)
 
+For the temporary Windows UI Automation path, see [native UI Goal resume](goal-ui-resume.md). It does not use this withdrawn launcher bridge.
+
 **Activation withdrawn on 2026-10-28.** A Desktop session failed to spawn `codex-code-mode-host.exe` after the custom launcher rollout. The ordinary launcher subsequently restored working command execution. The full cause has not been reproduced in isolation, but the bridge's runtime discovery checked only `codex.exe`, and the installer's `--version` smoke test could not detect missing runtime companions. Automatic `-Enable` now fails before compilation, file creation or environment changes. Do not set `CODEX_CLI_PATH` manually to bypass this restriction. Use the native Goal Resume control.
 
 The validation defect has since been reproduced and fixed: diagnostic builds check all companion helpers and a real local code-mode host handshake. This still does not validate Desktop lifecycle compatibility, so activation remains blocked. See [reproduction evidence and remaining limits](goal-runtime-investigation.md).

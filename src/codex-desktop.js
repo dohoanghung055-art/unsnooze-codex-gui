@@ -99,6 +99,11 @@ export function createDesktopClient({
     return toolResult(result);
   }
   return {
+    endpoint: discover,
+    async navigate(rec) {
+      const result = await call(rec, 'navigate_to_codex_page', { threadId: rec.sessionId });
+      if (result?.navigated !== true) throw new Error('Desktop did not confirm navigation');
+    },
     async read(rec) {
       const result = await call(rec, 'read_thread', {
         threadId: rec.sessionId, hostId: 'local', turnLimit: 1,
@@ -109,7 +114,7 @@ export function createDesktopClient({
       const turn = result.turns?.[0];
       // Conversation text is untrusted and is not used as an instruction.
       return {
-        id: result.thread.id, status: result.thread.status?.type,
+        id: result.thread.id, title: result.thread.title, status: result.thread.status?.type,
         turn: turn ? {
           id: turn.id, status: turn.status, error: turn.error ?? null,
           startedAt: turn.startedAt == null ? null : turn.startedAt * 1000,

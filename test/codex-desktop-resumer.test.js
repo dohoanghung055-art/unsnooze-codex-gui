@@ -125,6 +125,23 @@ function goalFor(rec, status = 'usageLimited') {
     createdAt: 1, updatedAt: 2, tokenBudget: 1000, tokensUsed: 100, timeUsedSeconds: 10 };
 }
 
+test('Goal UI preparation waits before claiming; definite non-invocation releases a claim', options, async () => {
+  for (const phase of ['prepare', 'resume']) {
+    const rec = seed();
+    const desktop = { read: async () => stopped(rec),
+      readGoal: async () => ({ available: true, goal: goalFor(rec) }),
+      prepareGoal: async () => { if (phase === 'prepare') throw new Error('locked'); },
+      resumeGoal: async () => { throw Object.assign(new Error('user input'), { notAttempted: true }); },
+      send: () => assert.fail('Goal must not send a prompt'),
+    };
+    assert.equal(await dispatchOne(rec, { mux, desktop }), 'probe');
+    const stored = readState().sessions[rec.key];
+    assert.equal(stored.status, 'stopped');
+    assert.ok(!stored.desktopWake);
+    assert.equal(stored.attempts, 0);
+  }
+});
+
 test('Goal activation is claimed before delivery, sends no prompt, and verifies state plus execution', options, async () => {
   const rec = seed(); let started = false, activations = 0;
   const desktop = {

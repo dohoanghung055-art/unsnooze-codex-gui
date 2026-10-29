@@ -27,6 +27,7 @@ export const DEFAULTS = {
   ntfyToken: '',           // optional Bearer token (tk_…) for authed servers
   ntfyPrivacy: 'full',     // full | terse (terse: never push cwd paths)
   guiWatch: true,          // daemon watches transcripts/rollouts for GUI-session stops
+  goalUiResume: false,     // Windows: native Goal button, unlocked and idle only
   updateCheck: true,       // daily registry version check + update notices/toast
   workspaceGuard: 'inform', // repo changed while stopped: off | inform | pause
   contextGuard: 'inform',   // wake re-reads a big cold context: off | inform | pause
@@ -78,6 +79,7 @@ const ENV_NAMES = {
   ntfyToken: 'UNSNOOZE_NTFY_TOKEN',
   ntfyPrivacy: 'UNSNOOZE_NTFY_PRIVACY',
   guiWatch: 'UNSNOOZE_GUI_WATCH',
+  goalUiResume: 'UNSNOOZE_GOAL_UI_RESUME',
   updateCheck: 'UNSNOOZE_UPDATE_CHECK',
   workspaceGuard: 'UNSNOOZE_WORKSPACE_GUARD',
   contextGuard: 'UNSNOOZE_CONTEXT_GUARD',

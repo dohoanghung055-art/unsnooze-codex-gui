@@ -92,6 +92,8 @@ Release `v1.20.1-henry-codex-gui.20261028` đã tải lên trước khi thêm ho
 
 ## Goal bị dừng sau rate limit
 
+**Bản tạm Windows UI Automation đã có trên `main`**: bật bằng `unsnooze config set goalUiResume true`, rồi khởi động lại daemon sau khi cập nhật mã. Nó dùng nút **Resume goal** của Desktop đang chạy, đọc SQLite ở chế độ chỉ đọc và không thay launcher. Máy phải mở khóa và không có thao tác ít nhất 60 giây. Xem [cách dùng, giới hạn và kiểm chứng](docs/goal-ui-resume.md). Release `20261028` chưa chứa bản này.
+
 **Đã tạm khóa kích hoạt cầu nối Goal thử nghiệm** sau lỗi runtime thiếu `codex-code-mode-host.exe`. Unsnooze vẫn tự resume chat qua Desktop như trước; Goal dùng nút **Resume** trong Codex hoặc `/goal resume`.
 
 Cổng app-tools hiện chưa có lệnh Goal. Việc thay launcher Desktop chưa được kiểm chứng đủ, nên trình cài hiện từ chối `-Enable` và không đổi `CODEX_CLI_PATH`. Nếu đã bật bản thử nghiệm, xem [hướng dẫn hoàn tác và giới hạn kiểm chứng](docs/goal-resume.md). Không bật lại bằng cách đổi biến môi trường thủ công.
