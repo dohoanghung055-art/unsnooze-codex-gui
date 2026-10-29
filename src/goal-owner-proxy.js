@@ -7,7 +7,7 @@ import { desktopDecision } from './codex-desktop.js';
 export function createOwnerProxy({ writeBackend, writeDesktop, timeoutMs = 15_000 }) {
   const prefix = `unsnooze-${randomUUID()}-`;
   const pending = new Map(), manual = new Map(), revisions = new Map(), queues = new Map();
-  let sequence = 0, initialized = false, healthy = true;
+  let sequence = 0, initialized = false, healthy = true, initializeId = null;
   const revision = id => revisions.get(id) || 0;
   const enqueue = (id, task) => {
     const next = (queues.get(id) || Promise.resolve()).catch(() => {}).then(task);
@@ -44,10 +44,12 @@ export function createOwnerProxy({ writeBackend, writeDesktop, timeoutMs = 15_00
     throw new Error('Thread is not loaded in this Desktop owner');
   }
   return {
+    get ready() { return initialized && healthy; },
     fromDesktop(line) {
       let message;
       try { message = JSON.parse(line); } catch { writeBackend(line + '\n'); return; }
       if (message.method === 'initialized') initialized = true;
+      if (message.method === 'initialize' && Object.hasOwn(message, 'id')) initializeId = message.id;
       if (['turn/start', 'turn/steer', 'turn/interrupt', 'thread/resume', 'thread/archive'].includes(message.method)
         && message.params?.threadId) {
         const threadId = message.params.threadId;
@@ -70,6 +72,10 @@ export function createOwnerProxy({ writeBackend, writeDesktop, timeoutMs = 15_00
       try { message = JSON.parse(line); } catch { writeDesktop(line + '\n'); return; }
       // Requests from the backend may reuse an ID; only consume responses.
       if (!message.method && Object.hasOwn(message, 'id')) {
+        if (initializeId !== null && message.id === initializeId) {
+          initialized = !message.error && Object.hasOwn(message, 'result');
+          initializeId = null;
+        }
         const waiter = pending.get(message.id) || manual.get(message.id);
         if (waiter) {
           waiter.finish(message.error ? new Error(message.error.message || 'Goal request failed') : null, message.result);
